@@ -7,7 +7,7 @@
 	import DeployDialog from "$lib/components/detail/DeployDialog.svelte";
 	import ConnectionStrip from "$lib/components/shell/ConnectionStrip.svelte";
 	import { Button } from "$lib/components/ui/button";
-	import { RefreshCw, X } from "@lucide/svelte";
+	import { RefreshCw, Settings, X } from "@lucide/svelte";
 	import { api } from "$lib/api/client";
 	import type { ResourceKind } from "$lib/api/types";
 	import { instance } from "$lib/stores/instance.svelte";
@@ -59,13 +59,18 @@
 	let viewMode = $state<"table" | "cards">("table");
 	let deployTarget = $state<{ uuid: string; kind: ResourceKind } | null>(null);
 
-	// Single boot guard: covers both the cold-start case (already onboarded
-	// on first paint) and the fresh-onboard case (user just saved creds via
-	// ConnectScreen). Either path flips `instance.url` non-null and we run
-	// the resource poll + image scheduler exactly once.
+	// Single boot guard: must wait for credentialsReady=true (load_credentials
+	// resolved and the Rust client is live). Firing resources.start() on
+	// instance.url alone races the keyring probe and the first poll hits
+	// "no Coolify credentials set" before the client is built.
 	let bootStarted = false;
 	$effect(() => {
-		if (instance.url == null || bootStarted) return;
+		if (
+			instance.url == null ||
+			credentialsReady !== true ||
+			bootStarted
+		)
+			return;
 		bootStarted = true;
 		void (async () => {
 			await resources.start();
@@ -173,6 +178,15 @@
 				>
 					<RefreshCw />
 					Refresh
+				</Button>
+				<Button
+					variant="outline"
+					size="icon-sm"
+					aria-label="Settings"
+					title="Settings"
+					href="/settings"
+				>
+					<Settings />
 				</Button>
 			</div>
 		</div>

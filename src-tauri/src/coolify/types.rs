@@ -183,6 +183,16 @@ pub(crate) struct RawService {
     pub updated_at: Option<String>,
     pub environment: Option<RawEnvironment>,
     pub destination: Option<RawDestination>,
+    /// Coolify nests per-container FQDNs here when the service composes
+    /// multiple apps; top-level `fqdn` is often null while the first
+    /// `service_application` carries the user-facing domain.
+    pub service_applications: Option<Vec<RawServiceContainerFqdn>>,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Deserialize)]
+pub(crate) struct RawServiceContainerFqdn {
+    pub fqdn: Option<String>,
 }
 
 #[allow(dead_code)]
@@ -286,6 +296,27 @@ impl RawService {
         let (project_uuid, project_name, environment_name) = unpack_environment(self.environment);
         let status = parse_status(self.status.as_deref().unwrap_or(""));
         let last_deployed_at = pick_last_deployed(self.last_online_at, self.updated_at);
+        // Coolify's GET /services list does NOT surface FQDN at top-level for
+        // services. Fall through in order:
+        //   1. top-level `fqdn` (only set on simple services)
+        //   2. nested `service_applications[*].fqdn` (rarely populated on list)
+        //   3. scrape `docker_compose_raw` for `coolify.fqdn=https://…` labels
+        //      or `SERVICE_FQDN_<NAME>=https://…` env declarations
+        let fqdn = self
+            .fqdn
+            .filter(|s| !s.trim().is_empty())
+            .or_else(|| {
+                self.service_applications.and_then(|apps| {
+                    apps.into_iter()
+                        .filter_map(|a| a.fqdn)
+                        .find(|s| !s.trim().is_empty())
+                })
+            })
+            .or_else(|| {
+                self.docker_compose_raw
+                    .as_deref()
+                    .and_then(scrape_service_fqdn)
+            });
         Resource {
             uuid: self.uuid.unwrap_or_default(),
             name: self.name.unwrap_or_default(),
@@ -294,12 +325,74 @@ impl RawService {
             project_name,
             environment_name,
             status,
-            fqdn: self.fqdn,
+            fqdn,
             image_ref: None,
             last_deployed_at,
             build_pack: None,
         }
     }
+}
+
+/// Pick the first user-facing URL out of a Coolify service's compose YAML.
+///
+/// Coolify encodes service FQDNs inside `docker_compose_raw` via either:
+///   - traefik/coolify labels: `coolify.fqdn=https://app.example.com`
+///   - magic env vars: `SERVICE_FQDN_APP=https://app.example.com`
+///
+/// Returns the first `https?://…` token we find from either convention,
+/// stripping a trailing comma/quote/space so the URL is render-ready.
+fn scrape_service_fqdn(yaml: &str) -> Option<String> {
+    for line in yaml.lines() {
+        let line = line.trim();
+        // Skip comments to avoid pulling URLs out of documentation blocks.
+        if line.starts_with('#') {
+            continue;
+        }
+        let lower = line.to_ascii_lowercase();
+        if lower.contains("coolify.fqdn") || lower.contains("service_fqdn_") {
+            if let Some(url) = extract_first_url(line) {
+                return Some(url);
+            }
+        }
+    }
+    // Last-resort: just take the first https:// token in the file. Better a
+    // best-effort domain than a permanent dash.
+    extract_first_url(yaml)
+}
+
+fn extract_first_url(s: &str) -> Option<String> {
+    let bytes = s.as_bytes();
+    for scheme in ["https://", "http://"] {
+        if let Some(start) = s.find(scheme) {
+            let mut end = start + scheme.len();
+            while end < bytes.len() {
+                let b = bytes[end];
+                let is_url_char = b.is_ascii_alphanumeric()
+                    || matches!(
+                        b,
+                        b'.' | b'-'
+                            | b'_'
+                            | b'/'
+                            | b':'
+                            | b'?'
+                            | b'='
+                            | b'&'
+                            | b'%'
+                            | b'+'
+                            | b'~'
+                            | b'#'
+                    );
+                if !is_url_char {
+                    break;
+                }
+                end += 1;
+            }
+            if end > start + scheme.len() {
+                return Some(s[start..end].trim_end_matches('/').to_string());
+            }
+        }
+    }
+    None
 }
 
 impl RawDatabase {

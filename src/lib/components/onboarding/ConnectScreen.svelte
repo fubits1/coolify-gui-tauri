@@ -57,8 +57,8 @@ Props:
 		if (!tested?.ok) return;
 		saving = true;
 		try {
-			await api.setCredentials(url.trim(), token.trim());
 			const aliasValue = alias.trim() || new URL(url.trim()).host;
+			await api.setCredentials(url.trim(), token.trim(), aliasValue);
 			await instance.save(url.trim(), aliasValue);
 			toast.success(`Connected to ${tested.team ?? aliasValue}`);
 			onConnected(url.trim(), aliasValue);

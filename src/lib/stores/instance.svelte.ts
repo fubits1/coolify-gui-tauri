@@ -46,7 +46,8 @@ class InstanceStore {
 
   /**
    * Persist a new {url, alias}. Updates reactive state immediately so the
-   * UI doesn't lag behind disk I/O. The plugin auto-saves (debounced 100ms).
+   * UI doesn't lag behind disk I/O. We explicitly `save()` to force a disk
+   * flush — autoSave is debounced and won't survive an immediate app quit.
    */
   async save(url: string, alias: string): Promise<void> {
     this.url = url;
@@ -54,6 +55,21 @@ class InstanceStore {
     const store = await this.#getStore();
     await store.set(KEY_URL, url);
     await store.set(KEY_ALIAS, alias);
+    await store.save();
+  }
+
+  /**
+   * Sign-out path: wipe persisted url + alias. The keyring-side token is
+   * deleted separately via `api.clearCredentials`; this is purely the
+   * non-secret {url, alias} pair held in plugin-store.
+   */
+  async clear(): Promise<void> {
+    this.url = null;
+    this.alias = null;
+    const store = await this.#getStore();
+    await store.delete(KEY_URL);
+    await store.delete(KEY_ALIAS);
+    await store.save();
   }
 }
 

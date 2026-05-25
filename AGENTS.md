@@ -1,5 +1,12 @@
 # AGENTS.md — Working in this repo
 
+> **MANDATORY for every agent + main thread:**
+>
+> - **ALWAYS** obey `/nogrep` — use Read/Glob/fff/Grep tools. NEVER Bash cat/grep/find/head/tail/sed/awk. Bash is only for cargo, pnpm, dex, jq, gh.
+> - **ALWAYS** track work with `/dex` — every task gets created, marked `in_progress` on start, `completed` when done. Run `dex list mn0zcb89` to see current state. Never leave dex stale.
+>
+> Skipping either of these rules wastes the user's time and triggers permission prompts they have to click manually. Do not.
+
 Conventions for any agent (or human) touching this codebase.
 
 ## Package manager
@@ -69,7 +76,20 @@ SvelteKit filesystem routes. Not `svelte-spa-router`.
 
 ## Tauri commands
 
-HTTP runs Rust-side via `tauri-plugin-http` (reqwest). The webview never holds the Coolify bearer token. Token is stored via `tauri-plugin-keyring-api`.
+HTTP runs Rust-side via `tauri-plugin-http` (reqwest). The webview never holds the Coolify bearer token. Token is stored via the `keyring` crate (apple-native + windows-native + sync-secret-service + crypto-rust) — direct Rust integration, no community Tauri plugin. Linux requires a desktop session (D-Bus + Secret Service daemon — GNOME Keyring or KWallet); headless Linux is out of scope for this desktop GUI app.
+
+reqwest is built with `gzip + brotli + deflate` features. Coolify (Laravel + nginx/Traefik) ships compressed responses on list endpoints; without these features `text()` reads raw compressed bytes and serde_json errors with "premature end of input".
+
+## macOS Keychain prompts in dev mode
+
+`pnpm tauri dev` recompiles the Rust binary on every change. Each rebuild produces a new file hash → macOS Keychain treats it as a new application → re-prompts for "Allow access to `coolify_token_*`" on every relaunch, even after clicking "Always Allow". This is a Keychain + unsigned-binary limitation, **not a bug in the keyring wiring**.
+
+Production builds via `pnpm tauri build` are codesigned (with `APPLE_CERTIFICATE` env or ad-hoc) → "Always Allow" sticks across launches.
+
+Workarounds during dev:
+
+- Hit Return on the prompt — token loads, app proceeds.
+- For sustained testing of the auth path, build once via `pnpm tauri build` and run the bundle directly.
 
 ## Dev loop
 

@@ -1,6 +1,7 @@
 import { api } from "$lib/api/client";
 import type { Resource } from "$lib/api/types";
 import { connection } from "./connection.svelte";
+import { toast } from "$lib/util/toast";
 
 /**
  * Resources store — owns the polling loop that drives the overview screen.
@@ -82,14 +83,43 @@ class ResourcesStore {
    * One-shot fetch. Always safe to call (e.g. from a "Refresh" button).
    * Does NOT clear `list` on failure — stale-but-visible beats blank.
    */
+  /** Last error message from the most recent failed refresh, for debugging. */
+  lastError: string | null = $state(null);
+  /** True once an error toast has been shown — suppresses spam across retries. */
+  #errorToasted = false;
+
+  /** Per-endpoint partial-failure messages from the last refresh. */
+  endpointErrors: Record<string, string> = $state({});
+  /** Set of endpoint names we've already toasted, to avoid spam across polls. */
+  #partialToasted = new Set<string>();
+
   async refresh(): Promise<void> {
     this.loading = true;
     try {
-      const next = await api.listResources();
-      this.list = next;
+      const result = await api.listResources();
+      this.list = result.resources;
+      this.endpointErrors = result.errors;
       this.lastRefreshAt = Date.now();
+      this.lastError = null;
+      this.#errorToasted = false;
+      // Surface partial failures (e.g. /applications 403 while /services ok)
+      // ONCE per endpoint per session.
+      for (const [endpoint, msg] of Object.entries(result.errors)) {
+        if (!this.#partialToasted.has(endpoint)) {
+          this.#partialToasted.add(endpoint);
+          console.warn(`[resources] /${endpoint} failed:`, msg);
+          toast.error(`Failed to load /${endpoint}`, msg);
+        }
+      }
       connection.markOk();
-    } catch {
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.lastError = msg;
+      console.error("[resources] listResources failed:", msg);
+      if (!this.#errorToasted) {
+        toast.error("Failed to load resources", msg);
+        this.#errorToasted = true;
+      }
       // Keep last good list visible. Connection strip surfaces the failure.
       connection.markFailure();
     } finally {

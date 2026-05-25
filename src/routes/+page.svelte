@@ -7,7 +7,7 @@
 	import DeployDialog from "$lib/components/detail/DeployDialog.svelte";
 	import ConnectionStrip from "$lib/components/shell/ConnectionStrip.svelte";
 	import { Button } from "$lib/components/ui/button";
-	import { RefreshCw } from "@lucide/svelte";
+	import { RefreshCw, X } from "@lucide/svelte";
 	import { api } from "$lib/api/client";
 	import type { ResourceKind } from "$lib/api/types";
 	import { instance } from "$lib/stores/instance.svelte";
@@ -23,7 +23,38 @@
 	instance.load();
 	imageCache.load();
 
-	const onboarded = $derived(instance.url != null);
+	// Tri-state hydration: null while we wait for instance.load + the keyring
+	// rehydration to settle; false → no stored token, show ConnectScreen;
+	// true → token rehydrated, client is live in Rust state.
+	let credentialsReady = $state<boolean | null>(null);
+	let credentialsProbedUrl = $state<string | null>(null);
+
+	$effect(() => {
+		const url = instance.url;
+		if (url == null) {
+			// Either still loading, or user signed out — reset probe state so a
+			// future url change re-triggers loadCredentials.
+			if (credentialsProbedUrl != null) {
+				credentialsReady = null;
+				credentialsProbedUrl = null;
+			}
+			return;
+		}
+		if (credentialsProbedUrl === url) return;
+		credentialsProbedUrl = url;
+		void (async () => {
+			try {
+				const ok = await api.loadCredentials(url, instance.alias ?? undefined);
+				credentialsReady = ok;
+			} catch (err) {
+				const msg = err instanceof Error ? err.message : String(err);
+				toast.error("Failed to load credentials", msg);
+				credentialsReady = false;
+			}
+		})();
+	});
+
+	const onboarded = $derived(instance.url != null && credentialsReady === true);
 
 	let viewMode = $state<"table" | "cards">("table");
 	let deployTarget = $state<{ uuid: string; kind: ResourceKind } | null>(null);
@@ -42,9 +73,13 @@
 		})();
 	});
 
-	function handleConnected(_url: string, _alias: string) {
-		// ConnectScreen has already called instance.save(); reload to be
-		// safe (also flips `onboarded` via the derived above).
+	function handleConnected(url: string, _alias: string) {
+		// ConnectScreen has already called instance.save() and set_credentials
+		// (which persists the token to the keyring + builds the live client).
+		// Mark the keyring rehydration as already-satisfied for this url so the
+		// boot effect doesn't redundantly probe.
+		credentialsReady = true;
+		credentialsProbedUrl = url;
 		instance.load();
 	}
 
@@ -112,7 +147,11 @@
 	});
 </script>
 
-{#if !onboarded}
+{#if instance.url != null && credentialsReady === null}
+	<!-- Probing the keyring after a cold-start with a persisted URL.
+	     Render an empty shell so we don't flash ConnectScreen. -->
+	<div class="flex min-h-screen items-center justify-center bg-background"></div>
+{:else if !onboarded}
 	<ConnectScreen onConnected={handleConnected} />
 {:else}
 	<div class="flex h-screen flex-col">
@@ -139,7 +178,7 @@
 		</div>
 
 		<div class="flex min-h-0 flex-1">
-			<div class="flex-1 overflow-auto p-4">
+			<div class="flex min-h-0 min-w-0 flex-1 flex-col p-4">
 				{#if viewMode === "table"}
 					<TableView
 						resources={resources.list}
@@ -163,9 +202,20 @@
 				{/if}
 			</div>
 
-			<aside class="w-[28rem] shrink-0 border-l border-border">
-				<DetailPane resource={resources.selectedResource} />
-			</aside>
+			{#if resources.selectedResource}
+				<aside class="relative w-96 shrink-0 overflow-auto border-l border-border">
+					<button
+						type="button"
+						class="absolute right-2 top-2 z-10 inline-flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground"
+						aria-label="Close detail pane"
+						title="Close"
+						onclick={() => resources.select(null)}
+					>
+						<X class="size-4" />
+					</button>
+					<DetailPane resource={resources.selectedResource} />
+				</aside>
+			{/if}
 		</div>
 	</div>
 

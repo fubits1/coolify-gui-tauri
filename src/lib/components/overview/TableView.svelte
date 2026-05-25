@@ -131,7 +131,7 @@ Props:
 		"h-8 rounded-lg border border-input bg-background px-2 text-sm text-foreground outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50";
 </script>
 
-<div class="flex flex-col gap-3">
+<div class="flex h-full min-h-0 flex-col gap-3">
 	<div class="flex flex-wrap items-center gap-2">
 		<Input
 			type="search"
@@ -181,8 +181,9 @@ Props:
 		</div>
 	</div>
 
-	<Table>
-		<TableHeader>
+	<div class="min-h-0 flex-1 overflow-auto rounded-md border border-border">
+		<Table>
+			<TableHeader>
 			<TableRow>
 				<TableHead>Name</TableHead>
 				<TableHead>Type</TableHead>
@@ -212,15 +213,17 @@ Props:
 						class="cursor-pointer"
 						onclick={() => onSelect(r.uuid)}
 					>
-						<TableCell class="font-medium">{r.name}</TableCell>
+						<TableCell class="max-w-[14rem] truncate font-medium" title={r.name}>
+							{r.name}
+						</TableCell>
 						<TableCell class="text-muted-foreground">{r.kind}</TableCell>
 						<TableCell>
 							<StatusBadge status={r.status} />
 						</TableCell>
-						<TableCell class="max-w-[16rem] truncate text-muted-foreground">
+						<TableCell class="max-w-[12rem] truncate text-muted-foreground" title={r.fqdn ?? ""}>
 							{r.fqdn ?? "—"}
 						</TableCell>
-						<TableCell class="text-muted-foreground">
+						<TableCell class="whitespace-nowrap text-muted-foreground">
 							{relativeTime(r.last_deployed_at)}
 						</TableCell>
 						<TableCell>
@@ -280,4 +283,5 @@ Props:
 			{/if}
 		</TableBody>
 	</Table>
+	</div>
 </div>

@@ -69,7 +69,7 @@
 	async function saveInstance() {
 		try {
 			if (token) {
-				await api.setCredentials(url, token);
+				await api.setCredentials(url, token, alias || undefined);
 				token = "";
 			}
 			await instance.save(url, alias);
@@ -77,6 +77,20 @@
 		} catch (err) {
 			const message = err instanceof Error ? err.message : String(err);
 			toast.error(`Save failed: ${message}`);
+		}
+	}
+
+	async function signOut() {
+		try {
+			resources.stop();
+			await api.clearCredentials(instance.alias ?? undefined);
+			await instance.clear();
+			// Hard-reload to the root so the boot guard re-runs and ConnectScreen
+			// renders with a clean slate.
+			window.location.assign("/");
+		} catch (err) {
+			const message = err instanceof Error ? err.message : String(err);
+			toast.error(`Sign out failed: ${message}`);
 		}
 	}
 
@@ -180,6 +194,13 @@
 					{testing ? "Testing…" : "Test"}
 				</Button>
 				<Button onclick={saveInstance}>Save</Button>
+				<Button
+					variant="destructive"
+					class="ml-auto"
+					onclick={signOut}
+				>
+					Sign out
+				</Button>
 			</div>
 		</CardContent>
 	</Card>

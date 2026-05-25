@@ -65,7 +65,7 @@ Onboarding screen displays this guidance next to the token input.
 | 9 | Dark theme only | shadcn-svelte dark default; ops convention |
 | 10 | Connection-status strip + `svelte-sonner` toasts | Persistent state + per-action feedback |
 | 11 | Actions: **Restart** → `/restart`; **Stop** → `/stop`; **Deploy** → `/deploy?uuid=&force=` | Verified against Coolify OpenAPI |
-| 12 | Token storage: `tauri-plugin-keyring` (OS-native) | Encrypted at rest, cross-OS |
+| 12 | Token storage: `keyring` crate (apple-native + windows-native + sync-secret-service + crypto-rust) | Encrypted at rest, cross-OS. Linux requires a desktop session (D-Bus + Secret Service daemon — GNOME Keyring or KWallet); headless Linux not supported. |
 | 13 | HTTP from Rust side via `tauri-plugin-http` (reqwest) | Bypass CORS, hide token from webview |
 | 14 | Registry digest fetch via `oci-distribution` crate | Maintained, OCI-compliant, supports Docker Hub / GHCR / quay |
 
@@ -231,7 +231,7 @@ GitHub Actions: build all three on tag push. Local dev: `pnpm tauri dev`.
 Translates 1:1 into dex tasks. Each item is one ticket.
 
 1. Scaffold: `pnpm create tauri-app` → Svelte + TS, add `pnpm` lockfile, commit.
-2. Add Tauri plugins: `http`, `store`, `keyring`. Wire capabilities.
+2. Add Tauri plugins: `http`, `store`. Add `keyring` crate (apple-native + windows-native + sync-secret-service + crypto-rust) for OS-native token storage. Wire capabilities.
 3. Add shadcn-svelte, init theme, dark mode lock.
 4. SvelteKit filesystem routes: `+page.svelte` (overview) and `settings/+page.svelte`.
 5. Onboarding screen + Rust `test_connection` + token storage.

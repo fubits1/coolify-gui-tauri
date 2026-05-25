@@ -75,7 +75,60 @@ impl CoolifyClient {
     /// immediately — retrying a bad token is pointless.
     pub async fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T, CoolifyError> {
         let body = self.get_raw(path).await?;
-        serde_json::from_str::<T>(&body).map_err(|e| CoolifyError::Decode(e.to_string()))
+        match serde_json::from_str::<T>(&body) {
+            Ok(v) => Ok(v),
+            Err(e) => {
+                let len = body.len();
+                let char_count = body.chars().count();
+                let col = e.column();
+
+                // Try parsing as untyped Value — if THIS succeeds the JSON is
+                // valid and the failure is a field-type mismatch in our typed
+                // struct (serde_json sometimes reports type errors as EOF on
+                // single-line payloads).
+                let untyped: Result<serde_json::Value, _> = serde_json::from_str(&body);
+                let untyped_status = match &untyped {
+                    Ok(v) => {
+                        let arr_len = v.as_array().map(|a| a.len());
+                        format!("untyped OK (array_len={:?})", arr_len)
+                    }
+                    Err(ue) => format!("untyped ALSO failed: {}", ue),
+                };
+
+                // Dump a hex window around the reported failure byte so a
+                // non-printable control char is visible.
+                let hex_start = col.saturating_sub(32);
+                let hex_end = (col + 32).min(len);
+                let hex_bytes = body
+                    .as_bytes()
+                    .get(hex_start..hex_end)
+                    .map(|s| {
+                        s.iter()
+                            .map(|b| format!("{:02x}", b))
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    })
+                    .unwrap_or_else(|| "(slice oob)".to_string());
+
+                // Plain-text context around col (best-effort char-boundary slice).
+                let lo = nearest_char_boundary(&body, col.saturating_sub(200));
+                let hi = nearest_char_boundary(&body, (col + 200).min(len));
+                let context = body.get(lo..hi).unwrap_or("(slice failed)");
+
+                tracing::warn!(
+                    "decode failure on {}: len_bytes={} char_count={} col={} typed_err={} | {} | hex_around_col=[{}] | context={:?}",
+                    path,
+                    len,
+                    char_count,
+                    col,
+                    e,
+                    untyped_status,
+                    hex_bytes,
+                    context
+                );
+                Err(CoolifyError::Decode(format!("{} (col {}, {})", e, col, untyped_status)))
+            }
+        }
     }
 
     /// GET a path that requires authentication, returning the raw response body.
@@ -99,10 +152,33 @@ impl CoolifyClient {
                 Ok(resp) => {
                     let status = resp.status();
                     if status.is_success() {
-                        return resp
+                        let content_length = resp.content_length();
+                        let content_encoding = resp
+                            .headers()
+                            .get(reqwest::header::CONTENT_ENCODING)
+                            .and_then(|v| v.to_str().ok())
+                            .unwrap_or("(none)")
+                            .to_string();
+                        let content_type = resp
+                            .headers()
+                            .get(reqwest::header::CONTENT_TYPE)
+                            .and_then(|v| v.to_str().ok())
+                            .unwrap_or("(none)")
+                            .to_string();
+                        let body = resp
                             .text()
                             .await
-                            .map_err(|e| CoolifyError::Network(e.to_string()));
+                            .map_err(|e| CoolifyError::Network(e.to_string()))?;
+                        tracing::debug!(
+                            "GET {} ok: status={} cl={:?} ce={} ct={} body_bytes={}",
+                            url,
+                            status,
+                            content_length,
+                            content_encoding,
+                            content_type,
+                            body.len()
+                        );
+                        return Ok(body);
                     }
                     match status {
                         StatusCode::UNAUTHORIZED => return Err(CoolifyError::Unauthorized),
@@ -163,4 +239,15 @@ impl CoolifyClient {
             .await
             .map_err(|e| CoolifyError::Network(e.to_string()))
     }
+}
+
+/// Walk from `idx` toward 0 until landing on a UTF-8 char boundary.
+/// Lets us slice `&str` around an arbitrary byte index without panicking on
+/// multi-byte chars. Idempotent if `idx` is already a boundary.
+fn nearest_char_boundary(s: &str, idx: usize) -> usize {
+    let mut i = idx.min(s.len());
+    while i > 0 && !s.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
 }

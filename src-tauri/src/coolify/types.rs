@@ -142,6 +142,12 @@ pub struct ResourceDetail {
 // minor upstream change doesn't break parsing. We map them to the public
 // `Resource` / `ResourceDetail` structs in ops.rs.
 
+// Fields below are read at the JSON-walk level in `ops::build_detail`
+// (via serde_json::Value) rather than through the typed struct, so the
+// compiler flags them as "never read". They are intentionally kept here as
+// a schema reference for the upstream OpenAPI payload — once `build_detail`
+// is rewritten to consume `Raw*` directly, the warnings will disappear.
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 pub(crate) struct RawApplication {
     pub uuid: Option<String>,
@@ -154,12 +160,18 @@ pub(crate) struct RawApplication {
     pub git_commit_sha: Option<String>,
     pub ports_exposes: Option<String>,
     pub docker_compose_raw: Option<String>,
-    pub last_online_at: Option<DateTime<Utc>>,
-    pub updated_at: Option<DateTime<Utc>>,
+    // Coolify ships datetimes as MySQL-style "YYYY-MM-DD HH:MM:SS" (no `T`, no
+    // timezone) — NOT RFC 3339. Deserialising directly as `DateTime<Utc>`
+    // fails and serde_json surfaces it as a misleading "premature end of
+    // input" error. We accept raw String here and convert via
+    // `parse_loose_datetime` in `into_resource`.
+    pub last_online_at: Option<String>,
+    pub updated_at: Option<String>,
     pub environment: Option<RawEnvironment>,
     pub destination: Option<RawDestination>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 pub(crate) struct RawService {
     pub uuid: Option<String>,
@@ -167,20 +179,21 @@ pub(crate) struct RawService {
     pub status: Option<String>,
     pub fqdn: Option<String>,
     pub docker_compose_raw: Option<String>,
-    pub last_online_at: Option<DateTime<Utc>>,
-    pub updated_at: Option<DateTime<Utc>>,
+    pub last_online_at: Option<String>,
+    pub updated_at: Option<String>,
     pub environment: Option<RawEnvironment>,
     pub destination: Option<RawDestination>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 pub(crate) struct RawDatabase {
     pub uuid: Option<String>,
     pub name: Option<String>,
     pub status: Option<String>,
     pub image: Option<String>,
-    pub last_online_at: Option<DateTime<Utc>>,
-    pub updated_at: Option<DateTime<Utc>>,
+    pub last_online_at: Option<String>,
+    pub updated_at: Option<String>,
     pub environment: Option<RawEnvironment>,
     pub destination: Option<RawDestination>,
 }
@@ -197,11 +210,13 @@ pub(crate) struct RawProject {
     pub name: Option<String>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 pub(crate) struct RawDestination {
     pub server: Option<RawServer>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 pub(crate) struct RawServer {
     pub name: Option<String>,
@@ -214,10 +229,42 @@ pub(crate) struct RawEnvVar {
     pub is_secret: Option<bool>,
 }
 
+/// Accept either RFC 3339 (`2026-05-25T17:57:07Z`) or Coolify's MySQL-flavoured
+/// `YYYY-MM-DD HH:MM:SS` format (no `T`, no zone). Unknown formats → `None`.
+fn parse_loose_datetime(s: &str) -> Option<DateTime<Utc>> {
+    let trimmed = s.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if let Ok(d) = DateTime::parse_from_rfc3339(trimmed) {
+        return Some(d.with_timezone(&Utc));
+    }
+    if let Ok(d) = chrono::NaiveDateTime::parse_from_str(trimmed, "%Y-%m-%d %H:%M:%S") {
+        return Some(d.and_utc());
+    }
+    if let Ok(d) = chrono::NaiveDateTime::parse_from_str(trimmed, "%Y-%m-%dT%H:%M:%S") {
+        return Some(d.and_utc());
+    }
+    None
+}
+
+/// Pick the most recent of `last_online_at` / `updated_at` for the overview's
+/// "Last deploy" column. Either may be RFC 3339 or MySQL-style.
+fn pick_last_deployed(
+    last_online: Option<String>,
+    updated: Option<String>,
+) -> Option<DateTime<Utc>> {
+    last_online
+        .as_deref()
+        .and_then(parse_loose_datetime)
+        .or_else(|| updated.as_deref().and_then(parse_loose_datetime))
+}
+
 impl RawApplication {
     pub(crate) fn into_resource(self) -> Resource {
         let (project_uuid, project_name, environment_name) = unpack_environment(self.environment);
         let status = parse_status(self.status.as_deref().unwrap_or(""));
+        let last_deployed_at = pick_last_deployed(self.last_online_at, self.updated_at);
         Resource {
             uuid: self.uuid.unwrap_or_default(),
             name: self.name.unwrap_or_default(),
@@ -228,7 +275,7 @@ impl RawApplication {
             status,
             fqdn: self.fqdn,
             image_ref: None,
-            last_deployed_at: self.last_online_at.or(self.updated_at),
+            last_deployed_at,
             build_pack: self.build_pack,
         }
     }
@@ -238,6 +285,7 @@ impl RawService {
     pub(crate) fn into_resource(self) -> Resource {
         let (project_uuid, project_name, environment_name) = unpack_environment(self.environment);
         let status = parse_status(self.status.as_deref().unwrap_or(""));
+        let last_deployed_at = pick_last_deployed(self.last_online_at, self.updated_at);
         Resource {
             uuid: self.uuid.unwrap_or_default(),
             name: self.name.unwrap_or_default(),
@@ -248,7 +296,7 @@ impl RawService {
             status,
             fqdn: self.fqdn,
             image_ref: None,
-            last_deployed_at: self.last_online_at.or(self.updated_at),
+            last_deployed_at,
             build_pack: None,
         }
     }
@@ -258,6 +306,7 @@ impl RawDatabase {
     pub(crate) fn into_resource(self) -> Resource {
         let (project_uuid, project_name, environment_name) = unpack_environment(self.environment);
         let status = parse_status(self.status.as_deref().unwrap_or(""));
+        let last_deployed_at = pick_last_deployed(self.last_online_at, self.updated_at);
         Resource {
             uuid: self.uuid.unwrap_or_default(),
             name: self.name.unwrap_or_default(),
@@ -268,7 +317,7 @@ impl RawDatabase {
             status,
             fqdn: None,
             image_ref: self.image,
-            last_deployed_at: self.last_online_at.or(self.updated_at),
+            last_deployed_at,
             build_pack: None,
         }
     }

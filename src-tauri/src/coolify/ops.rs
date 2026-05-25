@@ -19,6 +19,16 @@ pub struct TestConnectionResult {
     pub team_name: Option<String>,
 }
 
+/// Bundle returned by `list_resources` so the frontend can surface
+/// per-endpoint failures without losing the resources that succeeded.
+#[derive(Debug, Serialize)]
+pub struct ListResourcesResult {
+    pub resources: Vec<Resource>,
+    /// Map of `endpoint -> error string` for endpoints that failed.
+    /// Empty when everything was 2xx + decoded cleanly.
+    pub errors: std::collections::HashMap<String, String>,
+}
+
 /// GET `/api/v1/health` then `/api/v1/teams` to validate a `{url, token}` pair.
 ///
 /// Used by the onboarding screen before persisting the token to the keyring.
@@ -48,17 +58,70 @@ pub async fn test_connection(url: String, token: String) -> Result<TestConnectio
 
 /// Construct a fresh `CoolifyClient` and store it in `AppState`.
 ///
-/// Called after onboarding succeeds + on app boot once the token is read
-/// back from the keyring. Replaces any existing client (handles token rotation).
+/// Called after onboarding succeeds. Persists the token to the OS keyring
+/// under `alias` (default: `"default"`) so subsequent boots can rehydrate
+/// the client via `load_credentials`. Replaces any existing client
+/// (handles token rotation).
 #[tauri::command]
 pub async fn set_credentials(
     url: String,
     token: String,
+    alias: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
+    let alias = alias.unwrap_or_else(|| "default".to_string());
+    crate::secrets::save_token(&alias, &token)?;
     let client = CoolifyClient::new(&url, &token).map_err(|e| e.to_string())?;
     let mut guard = state.client.write().await;
     *guard = Some(client);
+    Ok(())
+}
+
+/// Rehydrate the `CoolifyClient` from a token stored in the OS keyring.
+///
+/// Called on app boot once the persisted `{url, alias}` has been read from
+/// the plugin-store. Returns `true` if a token was found and the client is
+/// now live; `false` if no token exists (the frontend then shows
+/// `ConnectScreen`). Errors surface only on keyring access failures.
+#[tauri::command]
+pub async fn load_credentials(
+    url: String,
+    alias: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<bool, String> {
+    // Fast path: if a client is already built for this process, return ok
+    // without touching the OS keyring. Prevents a Keychain prompt on every
+    // Svelte HMR / Cmd+R during dev iteration.
+    {
+        let guard = state.client.read().await;
+        if guard.is_some() {
+            return Ok(true);
+        }
+    }
+
+    let alias = alias.unwrap_or_else(|| "default".to_string());
+    match crate::secrets::load_token(&alias)? {
+        Some(token) => {
+            let client = CoolifyClient::new(&url, &token).map_err(|e| e.to_string())?;
+            let mut guard = state.client.write().await;
+            *guard = Some(client);
+            Ok(true)
+        }
+        None => Ok(false),
+    }
+}
+
+/// Sign out: drop the stored token from the OS keyring and clear in-memory
+/// client state. Frontend is expected to also wipe the `instance` store
+/// (URL + alias) so the next boot drops the user back at `ConnectScreen`.
+#[tauri::command]
+pub async fn clear_credentials(
+    alias: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let alias = alias.unwrap_or_else(|| "default".to_string());
+    crate::secrets::delete_token(&alias)?;
+    *state.client.write().await = None;
     Ok(())
 }
 
@@ -68,22 +131,63 @@ pub async fn set_credentials(
 /// independently fetched via `tokio::join!`; if one endpoint errors the
 /// whole call fails (callers retry via the polling loop).
 #[tauri::command]
-pub async fn list_resources(state: State<'_, AppState>) -> Result<Vec<Resource>, String> {
+pub async fn list_resources(
+    state: State<'_, AppState>,
+) -> Result<ListResourcesResult, String> {
     let client = clone_client(&state).await?;
     let apps_fut = client.get::<Vec<RawApplication>>("api/v1/applications");
     let svcs_fut = client.get::<Vec<RawService>>("api/v1/services");
     let dbs_fut = client.get::<Vec<RawDatabase>>("api/v1/databases");
 
     let (apps, svcs, dbs) = tokio::join!(apps_fut, svcs_fut, dbs_fut);
-    let apps = apps.map_err(|e| e.to_string())?;
-    let svcs = svcs.map_err(|e| e.to_string())?;
-    let dbs = dbs.map_err(|e| e.to_string())?;
 
-    let mut out = Vec::with_capacity(apps.len() + svcs.len() + dbs.len());
-    out.extend(apps.into_iter().map(RawApplication::into_resource));
-    out.extend(svcs.into_iter().map(RawService::into_resource));
-    out.extend(dbs.into_iter().map(RawDatabase::into_resource));
-    Ok(out)
+    let mut out: Vec<Resource> = Vec::new();
+    let mut errors: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+
+    match apps {
+        Ok(list) => {
+            tracing::info!("list_resources: /applications -> {} items", list.len());
+            out.extend(list.into_iter().map(RawApplication::into_resource));
+        }
+        Err(e) => {
+            tracing::warn!("list_resources: /applications failed: {}", e);
+            errors.insert("applications".to_string(), e.to_string());
+        }
+    }
+    match svcs {
+        Ok(list) => {
+            tracing::info!("list_resources: /services -> {} items", list.len());
+            out.extend(list.into_iter().map(RawService::into_resource));
+        }
+        Err(e) => {
+            tracing::warn!("list_resources: /services failed: {}", e);
+            errors.insert("services".to_string(), e.to_string());
+        }
+    }
+    match dbs {
+        Ok(list) => {
+            tracing::info!("list_resources: /databases -> {} items", list.len());
+            out.extend(list.into_iter().map(RawDatabase::into_resource));
+        }
+        Err(e) => {
+            tracing::warn!("list_resources: /databases failed: {}", e);
+            errors.insert("databases".to_string(), e.to_string());
+        }
+    }
+
+    if out.is_empty() && !errors.is_empty() {
+        let combined = errors
+            .iter()
+            .map(|(k, v)| format!("{}: {}", k, v))
+            .collect::<Vec<_>>()
+            .join("; ");
+        return Err(combined);
+    }
+    Ok(ListResourcesResult {
+        resources: out,
+        errors,
+    })
 }
 
 /// Fetch one Resource by `{kind, uuid}` and expand its detail fields.
@@ -149,6 +253,39 @@ pub async fn deploy_resource(
     let path = format!("api/v1/deploy?uuid={}&force={}", uuid, force);
     client.get_raw(&path).await.map_err(|e| e.to_string())?;
     Ok(())
+}
+
+/// Debug: dump raw body + status length of /applications, /services, /databases.
+///
+/// Lets us see exactly what Coolify is returning when the typed parser yields
+/// empty results — wraps, status codes, shape mismatches all become visible.
+/// Frontend invokes via `api.debugDumpEndpoints()`.
+#[tauri::command]
+pub async fn debug_dump_endpoints(
+    state: State<'_, AppState>,
+) -> Result<std::collections::HashMap<String, String>, String> {
+    let client = clone_client(&state).await?;
+    let mut out = std::collections::HashMap::new();
+    for path in ["api/v1/applications", "api/v1/services", "api/v1/databases"] {
+        let result = client.get_raw(path).await;
+        let body = match result {
+            Ok(b) => {
+                tracing::info!("debug_dump {} ok: {} bytes", path, b.len());
+                let preview = if b.len() > 4000 {
+                    format!("{}…(truncated, total {} bytes)", &b[..4000], b.len())
+                } else {
+                    b
+                };
+                preview
+            }
+            Err(e) => {
+                tracing::warn!("debug_dump {} err: {}", path, e);
+                format!("ERROR: {}", e)
+            }
+        };
+        out.insert(path.to_string(), body);
+    }
+    Ok(out)
 }
 
 /// Fetch the last N lines of logs for a Resource as plain text.
@@ -227,12 +364,30 @@ fn build_detail(raw: serde_json::Value, kind: ResourceKind) -> ResourceDetail {
     let build_pack = get_str(&raw, "build_pack");
     let image_ref = get_str(&raw, "image");
 
+    // Coolify ships datetimes as MySQL-style "YYYY-MM-DD HH:MM:SS" (no `T`, no
+    // timezone). Accept both that and RFC 3339 — same loose parser as in
+    // types.rs/parse_loose_datetime, inlined to avoid a cross-module helper.
+    let parse_loose = |s: &str| -> Option<chrono::DateTime<chrono::Utc>> {
+        let trimmed = s.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        if let Ok(d) = chrono::DateTime::parse_from_rfc3339(trimmed) {
+            return Some(d.with_timezone(&chrono::Utc));
+        }
+        if let Ok(d) = chrono::NaiveDateTime::parse_from_str(trimmed, "%Y-%m-%d %H:%M:%S") {
+            return Some(d.and_utc());
+        }
+        if let Ok(d) = chrono::NaiveDateTime::parse_from_str(trimmed, "%Y-%m-%dT%H:%M:%S") {
+            return Some(d.and_utc());
+        }
+        None
+    };
     let last_deployed_at = raw
         .get("last_online_at")
         .or_else(|| raw.get("updated_at"))
         .and_then(|v| v.as_str())
-        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-        .map(|d| d.with_timezone(&chrono::Utc));
+        .and_then(parse_loose);
 
     // environment + project
     let env_obj = raw.get("environment");

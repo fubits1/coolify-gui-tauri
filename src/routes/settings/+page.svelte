@@ -134,7 +134,12 @@
 </script>
 
 <div class="mx-auto flex max-w-2xl flex-col gap-6 p-6">
-	<h1 class="text-2xl font-semibold">Settings</h1>
+	<div class="flex items-center gap-3">
+		<Button variant="outline" size="sm" href="/">
+			← Back
+		</Button>
+		<h1 class="text-2xl font-semibold">Settings</h1>
+	</div>
 
 	<Card>
 		<CardHeader>

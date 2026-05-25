@@ -84,6 +84,13 @@ pub struct Resource {
     /// `image_ref` for Databases + image-based Apps. Empty when Coolify
     /// hasn't supplied enough info (e.g. unset Application with no image).
     pub image_refs: Vec<String>,
+    /// Heartbeat — when the container last reported online. Constantly
+    /// refreshed for running containers (≈ "now" while up). Useful only for
+    /// non-running rows ("died X minutes ago").
+    pub last_online_at: Option<DateTime<Utc>>,
+    /// True last-deployment timestamp, fetched from
+    /// `/deployments/applications/{uuid}?take=1`. None for Services/Databases
+    /// (no equivalent endpoint) and Applications that have never deployed.
     pub last_deployed_at: Option<DateTime<Utc>>,
     pub build_pack: Option<String>,
 }
@@ -315,7 +322,8 @@ impl RawApplication {
             fqdn: self.fqdn,
             image_ref: single_image,
             image_refs,
-            last_deployed_at,
+            last_online_at: last_deployed_at,
+            last_deployed_at: None,
             build_pack: self.build_pack,
         }
     }
@@ -363,7 +371,8 @@ impl RawService {
             fqdn,
             image_ref: None,
             image_refs,
-            last_deployed_at,
+            last_online_at: last_deployed_at,
+            last_deployed_at: None,
             build_pack: None,
         }
     }
@@ -420,22 +429,60 @@ fn scrape_compose_images(yaml: &str) -> Vec<String> {
 /// Returns the first `https?://…` token we find from either convention,
 /// stripping a trailing comma/quote/space so the URL is render-ready.
 fn scrape_service_fqdn(yaml: &str) -> Option<String> {
+    // Pass 1: prefer Coolify's canonical fqdn/url markers. These hold the
+    // user-facing domain even when the rest of the file mentions internal
+    // hosts in healthchecks.
     for line in yaml.lines() {
         let line = line.trim();
-        // Skip comments to avoid pulling URLs out of documentation blocks.
         if line.starts_with('#') {
             continue;
         }
         let lower = line.to_ascii_lowercase();
-        if lower.contains("coolify.fqdn") || lower.contains("service_fqdn_") {
+        if lower.contains("coolify.fqdn")
+            || lower.contains("coolify.url")
+            || lower.contains("service_fqdn_")
+            || lower.contains("service_url_")
+        {
             if let Some(url) = extract_first_url(line) {
                 return Some(url);
             }
         }
     }
-    // Last-resort: just take the first https:// token in the file. Better a
-    // best-effort domain than a permanent dash.
+    // Pass 2: any traefik Host(...) rule typically encodes the public domain.
+    for line in yaml.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('#') {
+            continue;
+        }
+        let lower = trimmed.to_ascii_lowercase();
+        if lower.contains("traefik") && lower.contains("host(") {
+            if let Some(host) = extract_host_directive(trimmed) {
+                return Some(format!("https://{}", host));
+            }
+        }
+    }
+    // Last-resort: first non-loopback https:// in the file.
     extract_first_url(yaml)
+}
+
+/// Pull the first hostname out of a traefik `Host(\`name.example.com\`)`
+/// directive. Coolify (and bare traefik) stamps these as labels for
+/// reverse-proxy routing — the hostname is the public FQDN.
+fn extract_host_directive(line: &str) -> Option<String> {
+    let lower = line.to_ascii_lowercase();
+    let idx = lower.find("host(")?;
+    let after = &line[idx + 5..];
+    let close = after.find(')')?;
+    let inside = &after[..close];
+    let trimmed = inside.trim_matches(|c: char| c == '`' || c == '"' || c == '\'' || c.is_whitespace());
+    // Take just the first comma-separated host if there are multiple.
+    let first = trimmed.split(',').next().unwrap_or(trimmed);
+    let host = first.trim_matches(|c: char| c == '`' || c == '"' || c == '\'' || c.is_whitespace());
+    if host.is_empty() || host.starts_with("127.") || host == "localhost" {
+        None
+    } else {
+        Some(host.to_string())
+    }
 }
 
 fn extract_first_url(s: &str) -> Option<String> {
@@ -528,7 +575,8 @@ impl RawDatabase {
             fqdn: None,
             image_ref: image,
             image_refs,
-            last_deployed_at,
+            last_online_at: last_deployed_at,
+            last_deployed_at: None,
             build_pack: None,
         }
     }

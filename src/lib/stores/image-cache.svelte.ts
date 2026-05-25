@@ -45,6 +45,12 @@ class ImageCacheStore {
    * Force a single check. Spinner is tracked via `checking`. On success the
    * entry is written into `entries` so dependent `$derived` reads update.
    */
+  /**
+   * Single-image check. Silent on success — callers (per-row "Check now",
+   * batch "Check all") are responsible for any user-facing toast. Per-image
+   * toasts caused 13 sticky popups when checking a full supabase compose.
+   * Errors still toast individually so a partial failure surfaces.
+   */
   async check(imageRef: string): Promise<void> {
     if (this.checking.has(imageRef)) return;
     // Set is reactive in Svelte 5 — reassign to trigger fine-grained updates
@@ -54,12 +60,6 @@ class ImageCacheStore {
     try {
       const entry = await images.check(imageRef);
       this.entries = { ...this.entries, [imageRef]: entry };
-      const state = this.#stateFor(entry, imageRef);
-      if (state === "newer-available") {
-        toast.info(`Newer image available: ${imageRef}`);
-      } else {
-        toast.success(`Image up to date: ${imageRef}`);
-      }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       toast.error(`Image check failed: ${imageRef}`, msg);
@@ -106,6 +106,12 @@ class ImageCacheStore {
   isStale(imageRef: string): StaleState {
     const entry = this.entries[imageRef];
     if (!entry) return "unknown";
+    // Legacy cache entry from before the Hub API path landed: neither
+    // upstream reference is populated. Treat as unchecked so the scheduler
+    // re-fetches with the new logic instead of falsely reporting "fresh".
+    if (entry.latest_digest == null && entry.highest_semver_tag == null) {
+      return "unknown";
+    }
     return this.#stateFor(entry, imageRef);
   }
 

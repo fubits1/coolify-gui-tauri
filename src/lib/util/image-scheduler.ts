@@ -40,6 +40,10 @@ export async function runStartupCheck(resources: Resource[]): Promise<void> {
   const stale = refs.filter((ref) => {
     const entry = imageCache.entries[ref];
     if (!entry) return true;
+    // Legacy entries without an upstream reference are useless — force a
+    // re-check regardless of `checked_at` age. `isStale` returns "unknown"
+    // for that case.
+    if (imageCache.isStale(ref) === "unknown") return true;
     return now - entry.checked_at > DAY_MS;
   });
 
@@ -53,15 +57,20 @@ export async function runStartupCheck(resources: Resource[]): Promise<void> {
   );
   await imageCache.checkMany(stale);
 
-  const newer = stale.filter(
+  // Count newer-available ACROSS ALL refs (not just freshly-checked ones).
+  // The previous version missed older cache entries that were < 24h old
+  // and skipped this cycle but already classified as stale.
+  const newer = refs.filter(
     (ref) => imageCache.isStale(ref) === "newer-available",
   ).length;
   if (newer > 0) {
-    toast.info(
+    toast.warning(
       `${newer} image${newer === 1 ? " has" : "s have"} a newer version available`,
     );
   } else {
-    toast.success("All images are up to date");
+    toast.success(
+      `All ${refs.length} image${refs.length === 1 ? " is" : "s are"} up to date`,
+    );
   }
 }
 

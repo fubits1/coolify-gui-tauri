@@ -27,6 +27,7 @@ tauri-plugin-store = "2"
 keyring = { version = "3", default-features = false, features = ["apple-native", "windows-native", "sync-secret-service", "crypto-rust"] }
 reqwest = { version = "0.12", features = ["json", "rustls-tls", "gzip", "brotli", "deflate"] }
 tokio = { version = "1", features = ["macros", "sync", "fs"] }
+futures = "0.3"
 thiserror = "2"
 url = "2"
 tracing = "0.1"

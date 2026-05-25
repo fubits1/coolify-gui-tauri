@@ -33,6 +33,12 @@ Props:
 		if (checkedAt == null) {
 			return { variant: "secondary", class: "", label: "?" };
 		}
+		// Defensive: if we've supposedly checked some images but `total` is 0,
+		// the caller hasn't wired image_refs — render `?` so we don't claim
+		// "fresh" for unknown state.
+		if (total === 0) {
+			return { variant: "secondary", class: "", label: "?" };
+		}
 		if (stale === 0) {
 			return {
 				variant: "default",

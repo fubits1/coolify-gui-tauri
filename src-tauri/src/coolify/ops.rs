@@ -148,7 +148,19 @@ pub async fn list_resources(
     match apps {
         Ok(list) => {
             tracing::info!("list_resources: /applications -> {} items", list.len());
-            out.extend(list.into_iter().map(RawApplication::into_resource));
+            // Pull in real last-deployment timestamps (60s cache) so the
+            // overview shows when each app actually deployed, not the
+            // last_online_at heartbeat which is constantly refreshed.
+            let resources: Vec<Resource> = list
+                .into_iter()
+                .map(RawApplication::into_resource)
+                .collect();
+            let uuids: Vec<String> = resources.iter().map(|r| r.uuid.clone()).collect();
+            let deploys = fetch_last_deployments(&client, &state, &uuids).await;
+            for mut r in resources {
+                r.last_deployed_at = deploys.get(&r.uuid).cloned().flatten();
+                out.push(r);
+            }
         }
         Err(e) => {
             tracing::warn!("list_resources: /applications failed: {}", e);
@@ -314,6 +326,129 @@ async fn clone_client(state: &State<'_, AppState>) -> Result<CoolifyClient, Stri
         .as_ref()
         .cloned()
         .ok_or_else(|| "no Coolify credentials set — call set_credentials first".to_string())
+}
+
+/// Pull the most-recent deployment timestamp per application uuid, with a
+/// 60s in-memory cache to avoid re-hitting Coolify on every 5s poll.
+///
+/// Endpoint: `GET /deployments/applications/{uuid}?take=1` returns the
+/// freshest deployment record (uses Coolify's own pagination). We only need
+/// `created_at` from it.
+async fn fetch_last_deployments(
+    client: &CoolifyClient,
+    state: &State<'_, AppState>,
+    uuids: &[String],
+) -> std::collections::HashMap<String, Option<chrono::DateTime<chrono::Utc>>> {
+    use std::time::{Duration, Instant};
+
+    const TTL: Duration = Duration::from_secs(60);
+    let now = Instant::now();
+
+    // Phase 1: drain anything still fresh from the cache.
+    let mut out: std::collections::HashMap<
+        String,
+        Option<chrono::DateTime<chrono::Utc>>,
+    > = std::collections::HashMap::new();
+    let mut to_fetch: Vec<String> = Vec::new();
+    {
+        let cache = state.deploy_cache.read().await;
+        for uuid in uuids {
+            match cache.get(uuid) {
+                Some(entry) if now.duration_since(entry.fetched_at) < TTL => {
+                    out.insert(uuid.clone(), entry.last_deployed_at);
+                }
+                _ => to_fetch.push(uuid.clone()),
+            }
+        }
+    }
+
+    if to_fetch.is_empty() {
+        return out;
+    }
+
+    // Phase 2: fan out the remaining uuids in parallel.
+    let mut futs = Vec::with_capacity(to_fetch.len());
+    for uuid in &to_fetch {
+        let client = client.clone();
+        let uuid = uuid.clone();
+        futs.push(async move {
+            let path = format!("api/v1/deployments/applications/{}?take=1", uuid);
+            let res: Result<serde_json::Value, _> = client.get(&path).await;
+            let ts = match res {
+                Ok(v) => {
+                    let parsed = extract_first_deployment_timestamp(&v);
+                    let shape = if v.is_array() {
+                        format!("array(len={})", v.as_array().map(|a| a.len()).unwrap_or(0))
+                    } else if v.is_object() {
+                        "object".to_string()
+                    } else {
+                        "scalar/other".to_string()
+                    };
+                    tracing::info!(
+                        "last_deploy {}: shape={}, parsed={:?}",
+                        uuid,
+                        shape,
+                        parsed
+                    );
+                    parsed
+                }
+                Err(e) => {
+                    tracing::warn!("last_deploy fetch failed for {}: {}", uuid, e);
+                    None
+                }
+            };
+            (uuid, ts)
+        });
+    }
+    let results = futures::future::join_all(futs).await;
+
+    // Phase 3: write back to cache + accumulate output.
+    let mut cache = state.deploy_cache.write().await;
+    let fetched_at = Instant::now();
+    for (uuid, ts) in results {
+        cache.insert(
+            uuid.clone(),
+            super::DeployCacheEntry {
+                last_deployed_at: ts,
+                fetched_at,
+            },
+        );
+        out.insert(uuid, ts);
+    }
+    out
+}
+
+/// `/deployments/applications/{uuid}?take=1` returns either an array or an
+/// object with a `data` key; both shapes have at most one deployment record
+/// when `take=1`. Extract `created_at` and parse with the same loose
+/// datetime parser used elsewhere (RFC 3339 or MySQL `YYYY-MM-DD HH:MM:SS`).
+fn extract_first_deployment_timestamp(
+    v: &serde_json::Value,
+) -> Option<chrono::DateTime<chrono::Utc>> {
+    let first = v
+        .as_array()
+        .and_then(|a| a.first())
+        .or_else(|| v.get("data").and_then(|d| d.as_array()).and_then(|a| a.first()))
+        .or_else(|| if v.is_object() { Some(v) } else { None })?;
+    let raw = first.get("created_at").and_then(|x| x.as_str())?;
+    parse_loose_datetime(raw)
+}
+
+fn parse_loose_datetime(s: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    let trimmed = s.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if let Ok(d) = chrono::DateTime::parse_from_rfc3339(trimmed) {
+        return Some(d.with_timezone(&chrono::Utc));
+    }
+    if let Ok(d) = chrono::NaiveDateTime::parse_from_str(trimmed, "%Y-%m-%d %H:%M:%S") {
+        return Some(d.and_utc());
+    }
+    if let Ok(d) = chrono::NaiveDateTime::parse_from_str(trimmed, "%Y-%m-%dT%H:%M:%S") {
+        return Some(d.and_utc());
+    }
+    None
 }
 
 /// Only Applications + Services accept restart/stop/logs in v1.

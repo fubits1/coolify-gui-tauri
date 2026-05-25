@@ -214,7 +214,7 @@ Props:
 				<TableHead>Type</TableHead>
 				<TableHead>Status</TableHead>
 				<TableHead>FQDN</TableHead>
-				<TableHead>Last deploy</TableHead>
+				<TableHead title="Applications: real last-deployment timestamp from Coolify's /deployments history. Services/Databases: when the container was last online (blank while running, since the heartbeat is meaningless then).">Last deploy</TableHead>
 				<TableHead>Images</TableHead>
 				<TableHead class="text-right">Actions</TableHead>
 			</TableRow>
@@ -249,7 +249,13 @@ Props:
 							{r.fqdn ?? "—"}
 						</TableCell>
 						<TableCell class="whitespace-nowrap text-muted-foreground">
-							{relativeTime(r.last_deployed_at)}
+							{#if r.last_deployed_at}
+								{relativeTime(r.last_deployed_at)}
+							{:else if r.status.state !== "running" && r.last_online_at}
+								{relativeTime(r.last_online_at)}
+							{:else}
+								—
+							{/if}
 						</TableCell>
 						<TableCell>
 							{@const badge = imageBadgeFor(r.image_refs ?? [])}

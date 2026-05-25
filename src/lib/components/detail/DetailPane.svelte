@@ -45,19 +45,30 @@ Props:
 	let detailError = $state<string | null>(null);
 	let deployOpen = $state(false);
 
-	// Fetch detail whenever the selected resource changes. Reset first to
-	// avoid showing the previous resource's secrets/yaml while the new
-	// request is in flight.
+	// Stable identity for the *selected* resource. Polling reassigns the
+	// `resource` prop every 5s with refreshed status, but the underlying
+	// row identity (uuid + kind) doesn't change. Effects below depend on
+	// this derived value so they fire ONCE per selection switch, not on
+	// every poll refresh.
+	const selectionKey = $derived(
+		resource ? `${resource.kind}:${resource.uuid}` : null,
+	);
+
+	// Fetch detail whenever the SELECTION switches. Polling status updates
+	// no longer triggers a re-fetch (was hammering the API every 5s + reset
+	// the user's open tab back to Overview).
 	$effect(() => {
-		const r = resource;
+		const key = selectionKey;
 		detail = null;
 		detailError = null;
-		if (r == null) return;
+		if (key == null || resource == null) return;
 
 		let cancelled = false;
 		detailLoading = true;
+		const uuid = resource.uuid;
+		const kind = resource.kind;
 		api
-			.getResourceDetail(r.uuid, r.kind)
+			.getResourceDetail(uuid, kind)
 			.then((d) => {
 				if (cancelled) return;
 				detail = d;
@@ -75,10 +86,10 @@ Props:
 		};
 	});
 
-	// Reset the active tab to Overview when switching resources so we don't
-	// land on a tab that's hidden for the new kind (e.g. Compose on a DB).
+	// Reset the active tab to Overview when SWITCHING resources. Same trick:
+	// drive off `selectionKey` so polling refreshes don't reset the tab.
 	$effect(() => {
-		void resource?.uuid;
+		void selectionKey;
 		activeTab = "overview";
 	});
 

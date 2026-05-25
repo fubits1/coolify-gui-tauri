@@ -10,6 +10,7 @@ use tauri::{AppHandle, Runtime};
 
 use super::cache::{self, ImageCacheEntry};
 use super::digest::fetch_manifest_digest;
+use super::hub::{self, is_docker_hub_ref, split_hub_ref};
 use super::tags::{list_tags, pick_highest_semver};
 
 /// Fetch fresh digest + (optionally) latest-tag digest + highest semver tag
@@ -27,45 +28,98 @@ pub async fn check_image<R: Runtime>(
     image_ref: String,
     app: AppHandle<R>,
 ) -> Result<ImageCacheEntry, String> {
-    // Re-fetch the digest for the exact tag the user is pinned to.
-    let current_digest = fetch_manifest_digest(&image_ref, None)
+    let entry = if is_docker_hub_ref(&image_ref) {
+        check_via_hub_api(&image_ref).await?
+    } else {
+        check_via_oci(&image_ref).await?
+    };
+    cache::write_entry(&app, &image_ref, entry.clone()).await;
+    Ok(entry)
+}
+
+/// Single-call Docker Hub path: one Hub API request returns digest +
+/// `last_updated` for every recent tag in the repo, sorted newest-first.
+/// We pick the tag matching the user's current ref for `digest`, and tag
+/// index 0 (most-recently-updated) for `latest_digest`. If the current
+/// tag isn't in the first page, we mark digest empty — the badge then
+/// surfaces this as "unknown" via the existing isStale logic.
+async fn check_via_hub_api(image_ref: &str) -> Result<ImageCacheEntry, String> {
+    let (namespace, repository) = split_hub_ref(image_ref);
+    let current_tag = split_ref(image_ref).1.to_string();
+
+    let page = hub::fetch_tags(&namespace, &repository, 100)
+        .await
+        .map_err(|e| format!("docker hub api: {}", e))?;
+
+    let current_digest = page
+        .results
+        .iter()
+        .find(|t| t.name == current_tag)
+        .and_then(hub::primary_digest_for)
+        .unwrap_or_default();
+
+    // `results` is ordered last_updated DESC. The first entry is the
+    // newest published tag — that's the upstream reference we compare
+    // against. If the current tag IS the newest (same name), there is
+    // by definition nothing newer.
+    let newest = page.results.first();
+    let latest_digest = match newest {
+        Some(t) if t.name != current_tag => hub::primary_digest_for(t),
+        Some(_) => {
+            // Current tag IS the newest published tag in the repo. Mark the
+            // latest_digest explicitly (= current digest) so a downstream
+            // `latest_digest == None` test can distinguish "we know it's
+            // current" from "legacy cache entry that never got populated".
+            if current_digest.is_empty() {
+                None
+            } else {
+                Some(current_digest.clone())
+            }
+        }
+        None => None,
+    };
+
+    let highest_semver_tag = pick_highest_semver(
+        &page.results.iter().map(|t| t.name.clone()).collect::<Vec<_>>(),
+    );
+
+    Ok(ImageCacheEntry {
+        digest: current_digest,
+        latest_digest,
+        highest_semver_tag,
+        checked_at: Utc::now().timestamp_millis(),
+    })
+}
+
+/// Fallback OCI Distribution v2 path for non-Docker-Hub registries
+/// (GHCR, quay, private). Three round-trips per image; failures are
+/// tolerated for `:latest` + tag listing so private registries still
+/// at least surface the current digest.
+async fn check_via_oci(image_ref: &str) -> Result<ImageCacheEntry, String> {
+    let current_digest = fetch_manifest_digest(image_ref, None)
         .await
         .map_err(|e| e.to_string())?;
-
-    // ALWAYS fetch the `:latest` digest + tag list — without these the
-    // frontend's `isStale` verdict has no upstream reference and every
-    // image shows up as ✓ fresh on first inspection. Failures are tolerated
-    // (private registries, missing :latest tag, anon rate limits) — we just
-    // store None and let the badge fall back to "checked, no signal".
-    let (repo, current_tag) = split_ref(&image_ref);
+    let (repo, current_tag) = split_ref(image_ref);
     let latest_digest = if current_tag != "latest" {
         fetch_manifest_digest(&format!("{repo}:latest"), None)
             .await
             .ok()
     } else {
-        // Already on :latest — the current digest IS the latest, so leave the
-        // dedicated field None and let semver tag comparison drive staleness.
         None
     };
     let highest_semver_tag = match list_tags(repo, None).await {
         Ok(tags) => pick_highest_semver(&tags),
         Err(e) => {
-            tracing::debug!("tag listing failed for {}: {}", image_ref, e);
+            tracing::debug!("oci tag listing failed for {}: {}", image_ref, e);
             None
         }
     };
-
-    let entry = ImageCacheEntry {
+    Ok(ImageCacheEntry {
         digest: current_digest,
         latest_digest,
         highest_semver_tag,
-        // Epoch milliseconds — matches the JS Date semantics consumed by the
-        // frontend (`new Date(checked_at)`, `now - checked_at > DAY_MS`).
         checked_at: Utc::now().timestamp_millis(),
-    };
-
-    cache::write_entry(&app, &image_ref, entry.clone()).await;
-    Ok(entry)
+    })
 }
 
 /// Return the full cache snapshot for the frontend store to hydrate badges.

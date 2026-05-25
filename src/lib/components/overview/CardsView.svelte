@@ -100,7 +100,15 @@ Props: identical to `TableView` (see that component for full prop docs).
 							total={badge.total}
 							checkedAt={badge.checkedAt}
 						/>
-						<span>{relativeTime(r.last_deployed_at)}</span>
+						<span title="Apps: real last-deploy from /deployments history. Non-running services: last-seen heartbeat.">
+							{#if r.last_deployed_at}
+								{relativeTime(r.last_deployed_at)}
+							{:else if r.status.state !== "running" && r.last_online_at}
+								{relativeTime(r.last_online_at)}
+							{:else}
+								—
+							{/if}
+						</span>
 					</div>
 				</CardContent>
 				<CardFooter class="flex justify-end gap-1 pb-4">

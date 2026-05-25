@@ -24,6 +24,11 @@ export interface Resource {
   image_ref?: string;
   /** All image:tag refs to watch for freshness (compose + single image). */
   image_refs: string[];
+  /** Heartbeat — Coolify's `last_online_at`. Constantly refreshed for running
+   *  containers, only useful for non-running rows ("died X ago"). */
+  last_online_at?: string;
+  /** True last-deploy timestamp from `/deployments/applications/{uuid}`.
+   *  Only populated for Applications. */
   last_deployed_at?: string;
   build_pack?: string;
 }

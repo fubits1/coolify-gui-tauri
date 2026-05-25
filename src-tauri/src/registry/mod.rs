@@ -11,6 +11,7 @@
 pub mod cache;
 pub mod commands;
 pub mod digest;
+pub mod hub;
 pub mod tags;
 
 use thiserror::Error;

@@ -2,10 +2,25 @@
 
 > **MANDATORY for every agent + main thread:**
 >
-> - **ALWAYS** obey `/nogrep` — use Read/Glob/fff/Grep tools. NEVER Bash cat/grep/find/head/tail/sed/awk. Bash is only for cargo, pnpm, dex, jq, gh.
-> - **ALWAYS** track work with `/dex` — every task gets created, marked `in_progress` on start, `completed` when done. Run `dex list mn0zcb89` to see current state. Never leave dex stale.
+> - **`/nogrep`** — use Read/Glob/fff/Grep tools. NEVER Bash `cat/grep/find/head/tail/sed/awk/wc/ls -R`. Bash is only for `cargo`, `pnpm`, `dex`, `jq`, `gh`, `mkdir`, `cp`, `git mv`, `which`.
+> - **`/dex`** — track every task via dex.
 >
-> Skipping either of these rules wastes the user's time and triggers permission prompts they have to click manually. Do not.
+> Skipping either rule wastes the user's time on permission prompts.
+>
+> ## How to use `/dex` WITHOUT tripping `/nogrep`
+>
+> The dex CLI is allowed; what trips nogrep is **piping dex output through banned tools**. Do this:
+>
+> | Allowed | Banned |
+> |---|---|
+> | `dex create "Title" --parent mn0zcb89 --description "what + why"` | `dex list \| grep ...` |
+> | `dex complete <id> --result "what landed"` | `dex list \| awk '{print $2}'` |
+> | `dex show <id>` | `$(dex list \| head -1)` |
+> | `dex list mn0zcb89` (read the output yourself in scrollback) | piping ANY dex output |
+>
+> Lifecycle: **create → (work) → complete**. One dex command per Bash call. Read IDs back from the previous output with your eyes — never extract them with `grep`/`awk`/`head`/`tail`. If you need to find a task by name, run `dex list mn0zcb89` and scan the output in the conversation.
+>
+> Mark `complete` ONLY after the fix is actually applied + verified (`pnpm check` / `cargo check` green). Marking a task complete while the bug still ships is a lie.
 
 Conventions for any agent (or human) touching this codebase.
 

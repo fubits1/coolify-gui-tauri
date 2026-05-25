@@ -126,11 +126,12 @@
 	// (compose YAML refs ∪ direct image_ref) and fan out a batched check.
 	// `runStartupCheck` already encapsulates the detail-fetch-for-compose
 	// dance, so we reuse it rather than re-implementing here.
-	function handleCheckAllImages() {
-		// Manual "Check all images" must BYPASS the scheduler's 24h cache gate.
+	async function handleCheckAllImages() {
+		// Manual "Check all images" BYPASSES the scheduler's 24h cache gate.
 		// Collect every image ref across the resource list and force a fresh
-		// check via imageCache.checkMany. The scheduler-style flow is only used
-		// for the daily-startup heartbeat in the boot effect above.
+		// batch via imageCache.checkMany. After the batch settles, count
+		// newer-available ACROSS ALL refs and toast a single summary so we
+		// don't claim "up to date" when some entries are stale.
 		const refs = new Set<string>();
 		for (const r of resources.list) {
 			for (const ref of r.image_refs ?? []) {
@@ -141,8 +142,21 @@
 			toast.info("No image refs to check");
 			return;
 		}
-		toast.info(`Checking ${refs.size} images for updates…`);
-		void imageCache.checkMany([...refs]);
+		const all = [...refs];
+		toast.info(`Checking ${all.length} images for updates…`);
+		await imageCache.checkMany(all);
+		const newer = all.filter(
+			(ref) => imageCache.isStale(ref) === "newer-available",
+		).length;
+		if (newer > 0) {
+			toast.warning(
+				`${newer} of ${all.length} image${newer === 1 ? " has" : "s have"} a newer version available`,
+			);
+		} else {
+			toast.success(
+				`All ${all.length} image${all.length === 1 ? " is" : "s are"} up to date`,
+			);
+		}
 	}
 
 	// Global keyboard shortcuts. Re-installs whenever the selected resource

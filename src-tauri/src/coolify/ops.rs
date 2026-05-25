@@ -147,7 +147,7 @@ pub async fn list_resources(
 
     match apps {
         Ok(list) => {
-            tracing::info!("list_resources: /applications -> {} items", list.len());
+            tracing::debug!("list_resources: /applications -> {} items", list.len());
             // Pull in real last-deployment timestamps (60s cache) so the
             // overview shows when each app actually deployed, not the
             // last_online_at heartbeat which is constantly refreshed.
@@ -169,7 +169,7 @@ pub async fn list_resources(
     }
     match svcs {
         Ok(list) => {
-            tracing::info!("list_resources: /services -> {} items", list.len());
+            tracing::debug!("list_resources: /services -> {} items", list.len());
             out.extend(list.into_iter().map(RawService::into_resource));
         }
         Err(e) => {
@@ -179,7 +179,7 @@ pub async fn list_resources(
     }
     match dbs {
         Ok(list) => {
-            tracing::info!("list_resources: /databases -> {} items", list.len());
+            tracing::debug!("list_resources: /databases -> {} items", list.len());
             out.extend(list.into_iter().map(RawDatabase::into_resource));
         }
         Err(e) => {
@@ -218,6 +218,72 @@ pub async fn get_resource_detail(
     let path = format!("api/v1/{}/{}", resource_kind.path_segment(), uuid);
     let raw: serde_json::Value = client.get(&path).await.map_err(|e| e.to_string())?;
     Ok(build_detail(raw, resource_kind))
+}
+
+/// Fetch env vars for a resource. Separate command so the detail pane can
+/// render IMMEDIATELY after `get_resource_detail` returns, and the EnvTab
+/// can populate in a second pass — Coolify's `/envs` endpoint is slow
+/// enough to block detail rendering for several seconds when bundled.
+#[tauri::command]
+pub async fn get_resource_envs(
+    uuid: String,
+    kind: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<EnvVar>, String> {
+    let resource_kind = ResourceKind::from_str(&kind)
+        .ok_or_else(|| format!("unknown resource kind: {}", kind))?;
+    let client = clone_client(&state).await?;
+    let envs_path = format!(
+        "api/v1/{}/{}/envs",
+        resource_kind.path_segment(),
+        uuid
+    );
+    match client.get::<serde_json::Value>(&envs_path).await {
+        Ok(v) => Ok(parse_envs(&v)),
+        Err(e) => {
+            tracing::warn!("/envs fetch failed for {}/{}: {}", kind, uuid, e);
+            Err(e.to_string())
+        }
+    }
+}
+
+/// Parse Coolify's `/envs` response into our `EnvVar` shape. The endpoint
+/// returns `[{ key, value, real_value, is_shown_once, ... }]` — we map
+/// `key` straight through and prefer `real_value` (full token) over
+/// `value` (masked) since the UI handles its own masking.
+fn parse_envs(v: &serde_json::Value) -> Vec<EnvVar> {
+    // Accept bare array (documented), `{ data: [...] }` wrapper (Coolify
+    // sometimes paginates), or `{ envs: [...] }` (legacy / variant).
+    let arr = v
+        .as_array()
+        .or_else(|| v.get("data").and_then(|d| d.as_array()))
+        .or_else(|| v.get("envs").and_then(|d| d.as_array()))
+        .or_else(|| v.get("environment_variables").and_then(|d| d.as_array()));
+    let arr = match arr {
+        Some(a) => a,
+        None => return Vec::new(),
+    };
+    arr.iter()
+        .filter_map(|item| {
+            let key = item.get("key")?.as_str()?.to_string();
+            let value = item
+                .get("real_value")
+                .and_then(|x| x.as_str())
+                .or_else(|| item.get("value").and_then(|x| x.as_str()))
+                .unwrap_or("")
+                .to_string();
+            let is_secret = item
+                .get("is_shown_once")
+                .and_then(|x| x.as_bool())
+                .or_else(|| item.get("is_preview").and_then(|x| x.as_bool()))
+                .unwrap_or(true);
+            Some(EnvVar {
+                key,
+                value,
+                is_secret,
+            })
+        })
+        .collect()
 }
 
 /// POST-equivalent: Coolify exposes `/restart` as GET. No body.
@@ -315,7 +381,21 @@ pub async fn tail_logs(
     let capped = lines.min(5000);
     let client = clone_client(&state).await?;
     let path = format!("api/v1/{}/{}/logs?lines={}", segment, uuid, capped);
-    client.get_raw(&path).await.map_err(|e| e.to_string())
+    // Coolify returns JSON `{"logs": "<text>"}`, not plain text. Decode
+    // accordingly; if the call 404s (services without log support) bubble
+    // a friendly message instead of the raw error.
+    let raw: Result<serde_json::Value, _> = client.get(&path).await;
+    match raw {
+        Ok(v) => Ok(v
+            .get("logs")
+            .and_then(|x| x.as_str())
+            .map(|s| s.to_string())
+            .unwrap_or_default()),
+        Err(crate::coolify::client::CoolifyError::NotFound) => {
+            Err("Logs are not available for this resource type via the Coolify API".to_string())
+        }
+        Err(e) => Err(e.to_string()),
+    }
 }
 
 // ── helpers ─────────────────────────────────────────────────────────────────
@@ -375,23 +455,7 @@ async fn fetch_last_deployments(
             let path = format!("api/v1/deployments/applications/{}?take=1", uuid);
             let res: Result<serde_json::Value, _> = client.get(&path).await;
             let ts = match res {
-                Ok(v) => {
-                    let parsed = extract_first_deployment_timestamp(&v);
-                    let shape = if v.is_array() {
-                        format!("array(len={})", v.as_array().map(|a| a.len()).unwrap_or(0))
-                    } else if v.is_object() {
-                        "object".to_string()
-                    } else {
-                        "scalar/other".to_string()
-                    };
-                    tracing::info!(
-                        "last_deploy {}: shape={}, parsed={:?}",
-                        uuid,
-                        shape,
-                        parsed
-                    );
-                    parsed
-                }
+                Ok(v) => extract_first_deployment_timestamp(&v),
                 Err(e) => {
                     tracing::warn!("last_deploy fetch failed for {}: {}", uuid, e);
                     None

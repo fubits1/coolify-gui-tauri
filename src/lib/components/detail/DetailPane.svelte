@@ -35,12 +35,14 @@ Props:
 	import EnvTab from "./tabs/EnvTab.svelte";
 	import ComposeTab from "./tabs/ComposeTab.svelte";
 	import LogsTab from "./tabs/LogsTab.svelte";
+	import ImagesTab from "./tabs/ImagesTab.svelte";
 
 	let { resource }: { resource: Resource | null } = $props();
 
 	type TabKey = "overview" | "env" | "compose" | "logs" | "images";
 	let activeTab = $state<TabKey>("overview");
 	let detail = $state<ResourceDetail | null>(null);
+	let envs = $state<import("$lib/api/types").EnvVar[]>([]);
 	let detailLoading = $state(false);
 	let detailError = $state<string | null>(null);
 	let deployOpen = $state(false);
@@ -57,9 +59,14 @@ Props:
 	// Fetch detail whenever the SELECTION switches. Polling status updates
 	// no longer triggers a re-fetch (was hammering the API every 5s + reset
 	// the user's open tab back to Overview).
+	//
+	// Envs come from a SEPARATE Coolify endpoint that's noticeably slower —
+	// fetched independently so the detail pane renders immediately and the
+	// Env tab populates in a second pass.
 	$effect(() => {
 		const key = selectionKey;
 		detail = null;
+		envs = [];
 		detailError = null;
 		if (key == null || resource == null) return;
 
@@ -79,6 +86,20 @@ Props:
 			})
 			.finally(() => {
 				if (!cancelled) detailLoading = false;
+			});
+
+		// Envs land in their own $state slot so resolution order doesn't matter
+		// (previously: if envs resolved before detail, the merge was skipped
+		// because detail was still null → tab label said "(N)" but content
+		// rendered the empty-state).
+		api
+			.getResourceEnvs(uuid, kind)
+			.then((next) => {
+				if (cancelled) return;
+				envs = next;
+			})
+			.catch((err) => {
+				console.warn("envs fetch failed", err);
 			});
 
 		return () => {
@@ -104,7 +125,7 @@ Props:
 				(detail?.docker_compose_raw ?? null) != null),
 	);
 
-	const envCount = $derived(detail?.env_vars.length ?? 0);
+	const envCount = $derived(envs.length);
 	const breadcrumb = $derived.by(() => {
 		if (!resource) return "";
 		const parts: string[] = [];
@@ -226,11 +247,7 @@ Props:
 			</TabsContent>
 
 			<TabsContent value="env" class="overflow-auto">
-				{#if detail}
-					<EnvTab env={detail.env_vars} />
-				{:else if detailLoading}
-					<div class="text-sm text-muted-foreground">Loading…</div>
-				{/if}
+				<EnvTab env={envs} />
 			</TabsContent>
 
 			{#if showComposeTab}
@@ -244,15 +261,19 @@ Props:
 			{/if}
 
 			<TabsContent value="logs" class="overflow-auto">
-				<LogsTab uuid={resource.uuid} kind={resource.kind} />
+				<LogsTab
+					uuid={resource.uuid}
+					kind={resource.kind}
+					active={activeTab === "logs"}
+				/>
 			</TabsContent>
 
 			{#if showImagesTab}
 				<TabsContent value="images" class="overflow-auto">
-					<!-- Owned by the Images-tab agent. Placeholder until wired. -->
-					<div class="text-sm text-muted-foreground">
-						Images tab — wired in a sibling task.
-					</div>
+					<ImagesTab
+						dockerComposeRaw={detail?.docker_compose_raw ?? undefined}
+						imageRef={resource.image_ref ?? undefined}
+					/>
 				</TabsContent>
 			{/if}
 		</Tabs>

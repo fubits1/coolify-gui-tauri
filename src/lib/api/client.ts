@@ -1,5 +1,10 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { Resource, ResourceDetail, TestConnectionResult } from "./types";
+import type {
+  EnvVar,
+  Resource,
+  ResourceDetail,
+  TestConnectionResult,
+} from "./types";
 
 export interface ListResourcesResult {
   resources: Resource[];
@@ -20,6 +25,8 @@ export const api = {
   listResources: () => invoke<ListResourcesResult>("list_resources"),
   getResourceDetail: (uuid: string, kind: string) =>
     invoke<ResourceDetail>("get_resource_detail", { uuid, kind }),
+  getResourceEnvs: (uuid: string, kind: string) =>
+    invoke<EnvVar[]>("get_resource_envs", { uuid, kind }),
   restart: (uuid: string, kind: string) =>
     invoke<void>("restart_resource", { uuid, kind }),
   stop: (uuid: string, kind: string) =>

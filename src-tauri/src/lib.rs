@@ -26,6 +26,7 @@ pub fn run() {
             coolify::ops::clear_credentials,
             coolify::ops::list_resources,
             coolify::ops::get_resource_detail,
+            coolify::ops::get_resource_envs,
             coolify::ops::restart_resource,
             coolify::ops::stop_resource,
             coolify::ops::deploy_resource,

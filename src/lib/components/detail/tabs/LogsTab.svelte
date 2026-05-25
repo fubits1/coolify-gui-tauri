@@ -17,15 +17,22 @@ Props:
 	import { Button } from "$lib/components/ui/button";
 	import { toast } from "$lib/util/toast";
 
-	let { uuid, kind }: { uuid: string; kind: string } = $props();
+	let {
+		uuid,
+		kind,
+		active = true,
+	}: { uuid: string; kind: string; active?: boolean } = $props();
 
 	let text = $state("");
 	let loading = $state(false);
 	let lastRefreshAt = $state<number | null>(null);
 	let now = $state(Date.now());
 	let preEl: HTMLPreElement | null = $state(null);
+	let autoPaused = $state(false);
 
 	const lineCount = $derived(text.length === 0 ? 0 : text.split("\n").length);
+
+	const POLL_MS = 5000;
 
 	// Re-render the relative timestamp once per second. The interval is owned
 	// by the component so it cleans up automatically on unmount.
@@ -41,6 +48,30 @@ Props:
 		// Touch uuid so the effect re-runs on switch.
 		void uuid;
 		void refresh();
+	});
+
+	// Auto-poll while the tab is active, window focused, and not paused.
+	// Tab switch / window blur / pause toggle all stop the interval cleanly.
+	$effect(() => {
+		if (!active || autoPaused) return;
+		let focused =
+			typeof document === "undefined" ? true : document.hasFocus();
+		const onFocus = () => {
+			focused = true;
+		};
+		const onBlur = () => {
+			focused = false;
+		};
+		window.addEventListener("focus", onFocus);
+		window.addEventListener("blur", onBlur);
+		const id = setInterval(() => {
+			if (focused && !loading) void refresh();
+		}, POLL_MS);
+		return () => {
+			clearInterval(id);
+			window.removeEventListener("focus", onFocus);
+			window.removeEventListener("blur", onBlur);
+		};
 	});
 
 	async function refresh() {
@@ -71,16 +102,27 @@ Props:
 <div class="flex flex-col gap-2">
 	<div class="flex items-center justify-between">
 		<div class="text-xs text-muted-foreground">
-			Tailing last 500 lines · manual refresh
+			Tailing last 500 lines · auto-refresh every {POLL_MS / 1000}s
+			{#if autoPaused}<span class="text-amber-400"> · paused</span>{/if}
 		</div>
-		<Button
-			variant="outline"
-			size="sm"
-			onclick={refresh}
-			disabled={loading}
-		>
-			{loading ? "Loading…" : "Refresh"}
-		</Button>
+		<div class="flex items-center gap-2">
+			<Button
+				variant="outline"
+				size="sm"
+				onclick={() => (autoPaused = !autoPaused)}
+				title={autoPaused ? "Resume auto-refresh" : "Pause auto-refresh"}
+			>
+				{autoPaused ? "Resume" : "Pause"}
+			</Button>
+			<Button
+				variant="outline"
+				size="sm"
+				onclick={refresh}
+				disabled={loading}
+			>
+				{loading ? "Loading…" : "Refresh"}
+			</Button>
+		</div>
 	</div>
 
 	<pre

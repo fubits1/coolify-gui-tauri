@@ -78,6 +78,12 @@ export interface ResourceDetail extends Resource {
   dockerfile_location?: string;
   dockerfile_target_build?: string;
   watch_paths?: string;
+  pre_deployment_command?: string;
+  pre_deployment_command_container?: string;
+  post_deployment_command?: string;
+  post_deployment_command_container?: string;
+  custom_docker_run_options?: string;
+  static_image?: string;
   env_vars: EnvVar[];
   healthcheck?: Healthcheck;
   server_name?: string;

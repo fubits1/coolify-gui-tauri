@@ -45,8 +45,20 @@ Props:
 		push("Base directory", detail.base_directory);
 		push("Publish directory", detail.publish_directory);
 		push("Watch paths", detail.watch_paths);
+		push("Pre-deployment", detail.pre_deployment_command);
+		push("Pre-deployment container", detail.pre_deployment_command_container);
+		push("Post-deployment", detail.post_deployment_command);
+		push("Post-deployment container", detail.post_deployment_command_container);
+		push("Custom docker run options", detail.custom_docker_run_options);
+		push("Static image", detail.static_image);
 		return out;
 	});
+
+	const hasCustomCommands = $derived(
+		nonEmpty(detail.install_command) != null ||
+			nonEmpty(detail.build_command) != null ||
+			nonEmpty(detail.start_command) != null,
+	);
 
 	const dockerfileMeta: Array<{ label: string; value: string }> = $derived.by(() => {
 		const out: Array<{ label: string; value: string }> = [];
@@ -108,16 +120,20 @@ Props:
 	{:else if isCommandBased}
 		{#if commands.length > 0}
 			<Card>
-				<CardContent class="grid grid-cols-[10rem_1fr] gap-y-2 gap-x-3 p-4 text-xs">
+				<CardContent class="grid grid-cols-[14rem_1fr] gap-y-2 gap-x-3 p-4 text-xs">
 					{#each commands as item (item.label)}
 						<span class="text-muted-foreground">{item.label}</span>
-						<span class="font-mono break-all">{item.value}</span>
+						<span class="font-mono break-all whitespace-pre-wrap">{item.value}</span>
 					{/each}
 				</CardContent>
 			</Card>
-		{:else}
-			<div class="rounded-md border border-dashed border-border px-4 py-8 text-center text-sm text-muted-foreground">
-				No build commands configured. Coolify will use the build pack defaults.
+		{/if}
+		{#if !hasCustomCommands}
+			<div class="rounded-md border border-dashed border-border px-4 py-3 text-xs text-muted-foreground">
+				No install / build / start commands set — {buildPack} uses its
+				detected defaults. The actual <code class="font-mono">nixpacks.toml</code>
+				(if any) lives in your git repository; Coolify's API doesn't surface
+				it. Override by setting commands in the Coolify dashboard.
 			</div>
 		{/if}
 	{:else}

@@ -305,8 +305,6 @@ Props:
 					active={activeTab === "logs"}
 					containers={detail?.service_containers ?? []}
 					instanceUrl={instance.url}
-					projectUuid={resource.project_uuid ?? null}
-					environmentName={resource.environment_name ?? null}
 				/>
 			</TabsContent>
 

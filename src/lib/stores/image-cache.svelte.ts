@@ -106,9 +106,16 @@ class ImageCacheStore {
   isStale(imageRef: string): StaleState {
     const entry = this.entries[imageRef];
     if (!entry) return "unknown";
+    // `:latest`-pinned images cannot be reliably classified: the registry's
+    // `:latest` digest is by definition the "latest" digest, but the user's
+    // running container may have pulled `:latest` long ago and now hold a
+    // different digest. Coolify doesn't surface the running container's
+    // digest, so we can't compare. Return "unknown" → render as `?` with
+    // tooltip explaining.
+    const tag = parseTag(imageRef);
+    if (tag === "latest") return "unknown";
     // Legacy cache entry from before the Hub API path landed: neither
-    // upstream reference is populated. Treat as unchecked so the scheduler
-    // re-fetches with the new logic instead of falsely reporting "fresh".
+    // upstream reference is populated.
     if (entry.latest_digest == null && entry.highest_semver_tag == null) {
       return "unknown";
     }

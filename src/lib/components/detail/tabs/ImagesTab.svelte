@@ -63,7 +63,10 @@ Props:
     return hex.slice(0, 12);
   }
 
-  function badgeFor(state: StaleState): { label: string; class: string } {
+  function badgeFor(
+    state: StaleState,
+    tag: string,
+  ): { label: string; class: string; title?: string } {
     switch (state) {
       case "fresh":
         return {
@@ -76,6 +79,14 @@ Props:
           class: "bg-amber-600/20 text-amber-400 border-amber-600/30",
         };
       case "unknown":
+        if (tag === "latest") {
+          return {
+            label: "drift unknown (:latest)",
+            class: "bg-amber-600/20 text-amber-400 border-amber-600/30",
+            title:
+              "Image pinned to :latest. Coolify doesn't expose the running container's digest, so we can't tell whether the live container matches the registry's current :latest. Re-deploy to be certain.",
+          };
+        }
         return { label: "unchecked", class: "" };
     }
   }
@@ -118,7 +129,7 @@ Props:
       {#each rows as row (row.ref)}
         {@const entry = imageCache.entries[row.ref]}
         {@const state = imageCache.isStale(row.ref)}
-        {@const view = badgeFor(state)}
+        {@const view = badgeFor(state, row.tag)}
         {@const isChecking = imageCache.checking.has(row.ref)}
         {@const latestTag =
           entry?.highest_semver_tag && entry.highest_semver_tag !== row.tag
@@ -150,7 +161,9 @@ Props:
 
           <!-- Row 3: state badge + check-now -->
           <div class="flex items-center justify-between gap-2">
-            <Badge variant="default" class={view.class}>{view.label}</Badge>
+            <Badge variant="default" class={view.class} title={view.title ?? ""}>
+              {view.label}
+            </Badge>
             <Button
               size="xs"
               variant="outline"

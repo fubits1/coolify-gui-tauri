@@ -25,8 +25,6 @@ Props:
 		active = true,
 		containers = [],
 		instanceUrl = null,
-		projectUuid = null,
-		environmentName = null,
 	}: {
 		uuid: string;
 		kind: string;
@@ -35,22 +33,25 @@ Props:
 		 *  Coolify v1 API has no per-container logs endpoint, so we just
 		 *  surface a clear empty-state for services. */
 		containers?: ServiceContainer[];
-		/** Used to build a deep-link to the Coolify dashboard's terminal
-		 *  view when our own logs endpoint isn't available. */
+		/** Used to build a deep-link to the Coolify dashboard's resource
+		 *  page when our own logs endpoint isn't available. */
 		instanceUrl?: string | null;
-		projectUuid?: string | null;
-		environmentName?: string | null;
 	} = $props();
 
 	const isLogsSupported = $derived(kind === "Application" || kind === "application");
 
 	/**
-	 * Build the Coolify dashboard URL for this resource. Coolify routes are
-	 * `{base}/project/{project_uuid}/{environment_name}/{kind}/{uuid}` where
-	 * `{kind}` is the singular lowercase noun (`service`, `database`,
-	 * `application`). Falls back to the instance root if any piece is
-	 * missing — better to land the user on the dashboard than show a dead
-	 * link.
+	 * Build the Coolify dashboard URL for this resource. Coolify routes
+	 * resource pages at predictable plural-kind paths:
+	 *   `{base}/applications/{uuid}`
+	 *   `{base}/services/{uuid}`
+	 *   `{base}/databases/{uuid}`
+	 *
+	 * The longer `project/{project_uuid}/{env}/...` form is what the
+	 * dashboard ITSELF uses internally, but the short form 302-redirects
+	 * to it, so we use the short form to avoid depending on data the
+	 * list endpoints don't ship (environment_name, project_uuid — see
+	 * docs/coolify-api.md).
 	 */
 	const dashboardUrl = $derived.by(() => {
 		if (!instanceUrl) return null;
@@ -58,15 +59,13 @@ Props:
 		const kindLower = kind.toLowerCase();
 		const segment =
 			kindLower === "service"
-				? "service"
+				? "services"
 				: kindLower === "database"
-					? "database"
-					: "application";
-		if (projectUuid && environmentName) {
-			return `${base}/project/${projectUuid}/${encodeURIComponent(environmentName)}/${segment}/${uuid}`;
-		}
-		return base;
+					? "databases"
+					: "applications";
+		return `${base}/${segment}/${uuid}`;
 	});
+
 
 	let text = $state("");
 	let loading = $state(false);
@@ -140,10 +139,12 @@ Props:
 	 *   on failure. Auto-poll passes false → silent failure (inline notice
 	 *   stays in the pre block; no sticky toast spam on every poll).
 	 */
+	const SCROLL_STICKY_THRESHOLD_PX = 24;
+
 	async function refresh(interactive: boolean) {
 		loading = true;
 		try {
-			text = await api.tailLogs(
+			const next = await api.tailLogs(
 				uuid,
 				kind,
 				500,
@@ -151,9 +152,19 @@ Props:
 			);
 			lastErrorMsg = null;
 			lastRefreshAt = Date.now();
-			queueMicrotask(() => {
-				if (preEl) preEl.scrollTop = preEl.scrollHeight;
-			});
+			// Skip the reassignment entirely when content hasn't changed —
+			// otherwise every 5s poll forces Svelte to re-render the entire
+			// <pre> + scroll jumps to bottom even when there's no diff.
+			if (next === text) return;
+			// Preserve the user's scroll position unless they're already
+			// pinned to the bottom (typical "follow log" intent).
+			const wasAtBottom = isPinnedToBottom();
+			text = next;
+			if (wasAtBottom || interactive) {
+				queueMicrotask(() => {
+					if (preEl) preEl.scrollTop = preEl.scrollHeight;
+				});
+			}
 		} catch (err) {
 			const msg = err instanceof Error ? err.message : String(err);
 			lastErrorMsg = msg;
@@ -163,6 +174,12 @@ Props:
 		} finally {
 			loading = false;
 		}
+	}
+
+	function isPinnedToBottom(): boolean {
+		if (!preEl) return true;
+		const delta = preEl.scrollHeight - preEl.scrollTop - preEl.clientHeight;
+		return delta <= SCROLL_STICKY_THRESHOLD_PX;
 	}
 
 	// Re-fetch when the container selection changes.

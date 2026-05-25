@@ -37,6 +37,15 @@ export interface EnvVar {
   key: string;
   value: string;
   is_secret: boolean;
+  /** Preview-deploy scope. The same key can exist in both production and
+   *  preview with different values. */
+  is_preview: boolean;
+  /** Build-time only (not present at runtime). */
+  is_buildtime: boolean;
+  /** Runtime container env (default). */
+  is_runtime: boolean;
+  /** Team-shared variable, not resource-specific. */
+  is_shared: boolean;
 }
 
 export interface Healthcheck {

@@ -104,6 +104,14 @@ pub struct EnvVar {
     pub key: String,
     pub value: String,
     pub is_secret: bool,
+    /// Preview-deploy scope. Same key can coexist in production + preview.
+    pub is_preview: bool,
+    /// Build-time only (not present at runtime).
+    pub is_buildtime: bool,
+    /// Runtime container env (default).
+    pub is_runtime: bool,
+    /// Team-shared variable, not resource-specific.
+    pub is_shared: bool,
 }
 
 /// Healthcheck configuration as Coolify reports it.
@@ -600,6 +608,10 @@ impl RawEnvVar {
             key: self.key.unwrap_or_default(),
             value: self.value.unwrap_or_default(),
             is_secret: self.is_secret.unwrap_or(false),
+            is_preview: false,
+            is_buildtime: false,
+            is_runtime: true,
+            is_shared: false,
         }
     }
 }

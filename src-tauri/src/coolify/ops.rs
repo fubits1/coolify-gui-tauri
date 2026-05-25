@@ -252,8 +252,6 @@ pub async fn get_resource_envs(
 /// `key` straight through and prefer `real_value` (full token) over
 /// `value` (masked) since the UI handles its own masking.
 fn parse_envs(v: &serde_json::Value) -> Vec<EnvVar> {
-    // Accept bare array (documented), `{ data: [...] }` wrapper (Coolify
-    // sometimes paginates), or `{ envs: [...] }` (legacy / variant).
     let arr = v
         .as_array()
         .or_else(|| v.get("data").and_then(|d| d.as_array()))
@@ -262,6 +260,11 @@ fn parse_envs(v: &serde_json::Value) -> Vec<EnvVar> {
     let arr = match arr {
         Some(a) => a,
         None => return Vec::new(),
+    };
+    let bool_or = |item: &serde_json::Value, key: &str, default: bool| -> bool {
+        item.get(key)
+            .and_then(|x| x.as_bool())
+            .unwrap_or(default)
     };
     arr.iter()
         .filter_map(|item| {
@@ -272,15 +275,20 @@ fn parse_envs(v: &serde_json::Value) -> Vec<EnvVar> {
                 .or_else(|| item.get("value").and_then(|x| x.as_str()))
                 .unwrap_or("")
                 .to_string();
-            let is_secret = item
-                .get("is_shown_once")
-                .and_then(|x| x.as_bool())
-                .or_else(|| item.get("is_preview").and_then(|x| x.as_bool()))
-                .unwrap_or(true);
+            let is_secret = bool_or(item, "is_shown_once", true);
+            let is_preview = bool_or(item, "is_preview", false);
+            let is_buildtime = bool_or(item, "is_buildtime", false);
+            // Coolify defaults runtime=true unless explicitly false.
+            let is_runtime = bool_or(item, "is_runtime", true);
+            let is_shared = bool_or(item, "is_shared", false);
             Some(EnvVar {
                 key,
                 value,
                 is_secret,
+                is_preview,
+                is_buildtime,
+                is_runtime,
+                is_shared,
             })
         })
         .collect()

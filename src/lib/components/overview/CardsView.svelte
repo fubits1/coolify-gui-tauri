@@ -15,6 +15,7 @@ Props: identical to `TableView` (see that component for full prop docs).
 	import type { Resource, ResourceKind } from "$lib/api/types";
 	import StatusBadge from "$lib/components/badges/StatusBadge.svelte";
 	import ImageBadge from "$lib/components/badges/ImageBadge.svelte";
+	import { imageCache } from "$lib/stores/image-cache.svelte";
 	import { Button } from "$lib/components/ui/button";
 	import {
 		Card,
@@ -42,6 +43,29 @@ Props: identical to `TableView` (see that component for full prop docs).
 		onDeploy: (uuid: string, kind: ResourceKind) => void;
 		onCheckImages: () => void;
 	} = $props();
+
+	function imageBadgeFor(refs: string[]): {
+		stale: number;
+		total: number;
+		checkedAt: number | null;
+	} {
+		if (!refs || refs.length === 0) {
+			return { stale: 0, total: 0, checkedAt: null };
+		}
+		let stale = 0;
+		let earliest: number | null = null;
+		for (const ref of refs) {
+			if (imageCache.isStale(ref) === "newer-available") stale += 1;
+			const entry = imageCache.entries[ref];
+			if (entry) {
+				earliest =
+					earliest === null
+						? entry.checked_at
+						: Math.min(earliest, entry.checked_at);
+			}
+		}
+		return { stale, total: refs.length, checkedAt: earliest };
+	}
 </script>
 
 <div class="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
@@ -69,8 +93,13 @@ Props: identical to `TableView` (see that component for full prop docs).
 					<div class="truncate text-foreground">
 						{r.fqdn ?? r.image_ref ?? "—"}
 					</div>
+					{@const badge = imageBadgeFor(r.image_refs ?? [])}
 					<div class="flex items-center gap-2 text-xs">
-						<ImageBadge stale={0} total={0} checkedAt={null} />
+						<ImageBadge
+							stale={badge.stale}
+							total={badge.total}
+							checkedAt={badge.checkedAt}
+						/>
 						<span>{relativeTime(r.last_deployed_at)}</span>
 					</div>
 				</CardContent>

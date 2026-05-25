@@ -127,7 +127,22 @@
 	// `runStartupCheck` already encapsulates the detail-fetch-for-compose
 	// dance, so we reuse it rather than re-implementing here.
 	function handleCheckAllImages() {
-		void runStartupCheck(resources.list);
+		// Manual "Check all images" must BYPASS the scheduler's 24h cache gate.
+		// Collect every image ref across the resource list and force a fresh
+		// check via imageCache.checkMany. The scheduler-style flow is only used
+		// for the daily-startup heartbeat in the boot effect above.
+		const refs = new Set<string>();
+		for (const r of resources.list) {
+			for (const ref of r.image_refs ?? []) {
+				if (ref && ref.trim().length > 0) refs.add(ref);
+			}
+		}
+		if (refs.size === 0) {
+			toast.info("No image refs to check");
+			return;
+		}
+		toast.info(`Checking ${refs.size} images for updates…`);
+		void imageCache.checkMany([...refs]);
 	}
 
 	// Global keyboard shortcuts. Re-installs whenever the selected resource

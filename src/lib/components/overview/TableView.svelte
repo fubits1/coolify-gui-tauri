@@ -22,6 +22,7 @@ Props:
 	import type { Resource, ResourceKind } from "$lib/api/types";
 	import StatusBadge from "$lib/components/badges/StatusBadge.svelte";
 	import ImageBadge from "$lib/components/badges/ImageBadge.svelte";
+	import { imageCache } from "$lib/stores/image-cache.svelte";
 	import { Button } from "$lib/components/ui/button";
 	import { Input } from "$lib/components/ui/input";
 	import {
@@ -97,6 +98,30 @@ Props:
 		});
 		return list;
 	});
+
+	function imageBadgeFor(refs: string[]): {
+		stale: number;
+		total: number;
+		checkedAt: number | null;
+	} {
+		if (!refs || refs.length === 0) {
+			return { stale: 0, total: 0, checkedAt: null };
+		}
+		let stale = 0;
+		let earliest: number | null = null;
+		for (const ref of refs) {
+			const state = imageCache.isStale(ref);
+			if (state === "newer-available") stale += 1;
+			const entry = imageCache.entries[ref];
+			if (entry) {
+				earliest =
+					earliest === null
+						? entry.checked_at
+						: Math.min(earliest, entry.checked_at);
+			}
+		}
+		return { stale, total: refs.length, checkedAt: earliest };
+	}
 
 	const grouped = $derived.by<Record<string, Resource[]>>(() => {
 		if (groupBy === "none") return { "": sorted };
@@ -227,7 +252,8 @@ Props:
 							{relativeTime(r.last_deployed_at)}
 						</TableCell>
 						<TableCell>
-							<ImageBadge stale={0} total={0} checkedAt={null} />
+							{@const badge = imageBadgeFor(r.image_refs ?? [])}
+							<ImageBadge stale={badge.stale} total={badge.total} checkedAt={badge.checkedAt} />
 						</TableCell>
 						<TableCell class="text-right">
 							<div class="inline-flex items-center gap-1">

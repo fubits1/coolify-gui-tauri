@@ -32,39 +32,36 @@ pub async fn check_image<R: Runtime>(
         .await
         .map_err(|e| e.to_string())?;
 
-    // Compare against the prior cache entry to decide whether to spend extra
-    // API calls on `:latest` and tag listing.
-    let previous = cache::read_entry(&app, &image_ref).await;
-    let digest_unchanged = previous
-        .as_ref()
-        .map(|e| e.digest == current_digest)
-        .unwrap_or(false);
-
-    let (latest_digest, highest_semver_tag) = if digest_unchanged {
-        // Nothing moved on the pinned tag — see if a newer tag exists.
-        let (repo, current_tag) = split_ref(&image_ref);
-        let latest_digest = if current_tag != "latest" {
-            fetch_manifest_digest(&format!("{repo}:latest"), None)
-                .await
-                .ok()
-        } else {
-            None
-        };
-        let highest = match list_tags(repo, None).await {
-            Ok(tags) => pick_highest_semver(&tags),
-            Err(_) => None,
-        };
-        (latest_digest, highest)
+    // ALWAYS fetch the `:latest` digest + tag list — without these the
+    // frontend's `isStale` verdict has no upstream reference and every
+    // image shows up as ✓ fresh on first inspection. Failures are tolerated
+    // (private registries, missing :latest tag, anon rate limits) — we just
+    // store None and let the badge fall back to "checked, no signal".
+    let (repo, current_tag) = split_ref(&image_ref);
+    let latest_digest = if current_tag != "latest" {
+        fetch_manifest_digest(&format!("{repo}:latest"), None)
+            .await
+            .ok()
     } else {
-        // First check or digest moved: skip the extra round-trips this cycle.
-        (None, None)
+        // Already on :latest — the current digest IS the latest, so leave the
+        // dedicated field None and let semver tag comparison drive staleness.
+        None
+    };
+    let highest_semver_tag = match list_tags(repo, None).await {
+        Ok(tags) => pick_highest_semver(&tags),
+        Err(e) => {
+            tracing::debug!("tag listing failed for {}: {}", image_ref, e);
+            None
+        }
     };
 
     let entry = ImageCacheEntry {
         digest: current_digest,
         latest_digest,
         highest_semver_tag,
-        checked_at: Utc::now().timestamp(),
+        // Epoch milliseconds — matches the JS Date semantics consumed by the
+        // frontend (`new Date(checked_at)`, `now - checked_at > DAY_MS`).
+        checked_at: Utc::now().timestamp_millis(),
     };
 
     cache::write_entry(&app, &image_ref, entry.clone()).await;

@@ -1,7 +1,5 @@
-import type { Resource, ResourceDetail } from "$lib/api/types";
-import { api } from "$lib/api/client";
+import type { Resource } from "$lib/api/types";
 import { imageCache } from "$lib/stores/image-cache.svelte";
-import { parseComposeImages } from "$lib/util/compose";
 import { toast } from "$lib/util/toast";
 
 /**
@@ -68,46 +66,18 @@ export async function runStartupCheck(resources: Resource[]): Promise<void> {
 }
 
 /**
- * Pull image refs out of each resource:
- * - Application / Service with compose → fetch detail, parse YAML.
- * - Application non-compose / Database → use `image_ref` if present.
- * Returns a de-duplicated list.
+ * Pull every image ref out of `resources[*].image_refs` — the backend now
+ * populates this for us via compose-scrape + single-image-name+tag, so no
+ * per-resource detail fetch is needed. De-duplicate before returning.
  */
 async function collectImageRefs(resources: Resource[]): Promise<string[]> {
   const out = new Set<string>();
-
   for (const r of resources) {
-    // Fast path: a bare image ref is already known on the list view.
-    if (r.image_ref) {
-      out.add(r.image_ref);
-      continue;
-    }
-
-    // Compose-backed resources need a detail fetch to see the YAML.
-    if (r.kind === "Application" || r.kind === "Service") {
-      const detail = await fetchDetailSafe(r);
-      if (!detail) continue;
-      if (
-        detail.docker_compose_raw &&
-        detail.docker_compose_raw.trim().length > 0
-      ) {
-        for (const img of parseComposeImages(detail.docker_compose_raw)) {
-          out.add(`${img.image}:${img.tag}`);
-        }
-      } else if (detail.image_ref) {
-        out.add(detail.image_ref);
+    for (const ref of r.image_refs ?? []) {
+      if (ref && ref.trim().length > 0) {
+        out.add(ref);
       }
     }
   }
-
   return [...out];
-}
-
-/** Detail fetch that swallows errors — a missing detail must not abort the scheduler. */
-async function fetchDetailSafe(r: Resource): Promise<ResourceDetail | null> {
-  try {
-    return await api.getResourceDetail(r.uuid, r.kind);
-  } catch {
-    return null;
-  }
 }

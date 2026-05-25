@@ -76,7 +76,14 @@ pub struct Resource {
     pub environment_name: Option<String>,
     pub status: ResourceStatus,
     pub fqdn: Option<String>,
+    /// Primary image reference for single-image Resources (databases, apps
+    /// with `image:tag` build pack). `None` for compose Services + apps.
     pub image_ref: Option<String>,
+    /// Full list of `image:tag` refs this Resource depends on. Populated
+    /// from compose YAML for Services + dockercompose Apps; from
+    /// `image_ref` for Databases + image-based Apps. Empty when Coolify
+    /// hasn't supplied enough info (e.g. unset Application with no image).
+    pub image_refs: Vec<String>,
     pub last_deployed_at: Option<DateTime<Utc>>,
     pub build_pack: Option<String>,
 }
@@ -160,6 +167,10 @@ pub(crate) struct RawApplication {
     pub git_commit_sha: Option<String>,
     pub ports_exposes: Option<String>,
     pub docker_compose_raw: Option<String>,
+    /// For Applications built directly from a registry image (build_pack
+    /// "dockerimage"), Coolify ships the image name + tag separately.
+    pub docker_registry_image_name: Option<String>,
+    pub docker_registry_image_tag: Option<String>,
     // Coolify ships datetimes as MySQL-style "YYYY-MM-DD HH:MM:SS" (no `T`, no
     // timezone) — NOT RFC 3339. Deserialising directly as `DateTime<Utc>`
     // fails and serde_json surfaces it as a misleading "premature end of
@@ -258,16 +269,20 @@ fn parse_loose_datetime(s: &str) -> Option<DateTime<Utc>> {
     None
 }
 
-/// Pick the most recent of `last_online_at` / `updated_at` for the overview's
-/// "Last deploy" column. Either may be RFC 3339 or MySQL-style.
+/// Resolve the "Last deploy" timestamp for the overview row.
+///
+/// `last_online_at` is the only field that actually tracks deployments;
+/// `updated_at` is bumped on any config touch (env vars, healthcheck change,
+/// FQDN edit, etc.) and would falsely show "just now" for resources that
+/// haven't deployed in months. So we ONLY use `last_online_at`. If the
+/// resource has never come online, the cell renders `—`.
+///
+/// Accepts RFC 3339 and MySQL `YYYY-MM-DD HH:MM:SS` (with or without `T`).
 fn pick_last_deployed(
     last_online: Option<String>,
-    updated: Option<String>,
+    _updated: Option<String>,
 ) -> Option<DateTime<Utc>> {
-    last_online
-        .as_deref()
-        .and_then(parse_loose_datetime)
-        .or_else(|| updated.as_deref().and_then(parse_loose_datetime))
+    last_online.as_deref().and_then(parse_loose_datetime)
 }
 
 impl RawApplication {
@@ -275,6 +290,20 @@ impl RawApplication {
         let (project_uuid, project_name, environment_name) = unpack_environment(self.environment);
         let status = parse_status(self.status.as_deref().unwrap_or(""));
         let last_deployed_at = pick_last_deployed(self.last_online_at, self.updated_at);
+        // Image refs: prefer registry image (build_pack=dockerimage), else
+        // scrape compose YAML (build_pack=dockercompose). Git-built apps
+        // have no static image ref to watch.
+        let single_image = build_image_ref(
+            self.docker_registry_image_name.as_deref(),
+            self.docker_registry_image_tag.as_deref(),
+        );
+        let image_refs = if let Some(r) = single_image.clone() {
+            vec![r]
+        } else if let Some(yaml) = self.docker_compose_raw.as_deref() {
+            scrape_compose_images(yaml)
+        } else {
+            Vec::new()
+        };
         Resource {
             uuid: self.uuid.unwrap_or_default(),
             name: self.name.unwrap_or_default(),
@@ -284,7 +313,8 @@ impl RawApplication {
             environment_name,
             status,
             fqdn: self.fqdn,
-            image_ref: None,
+            image_ref: single_image,
+            image_refs,
             last_deployed_at,
             build_pack: self.build_pack,
         }
@@ -317,6 +347,11 @@ impl RawService {
                     .as_deref()
                     .and_then(scrape_service_fqdn)
             });
+        let image_refs = self
+            .docker_compose_raw
+            .as_deref()
+            .map(scrape_compose_images)
+            .unwrap_or_default();
         Resource {
             uuid: self.uuid.unwrap_or_default(),
             name: self.name.unwrap_or_default(),
@@ -327,10 +362,53 @@ impl RawService {
             status,
             fqdn,
             image_ref: None,
+            image_refs,
             last_deployed_at,
             build_pack: None,
         }
     }
+}
+
+/// Combine Coolify's split registry image name + tag into a `name:tag` ref.
+/// Returns None when name is missing — tag-only is meaningless.
+fn build_image_ref(name: Option<&str>, tag: Option<&str>) -> Option<String> {
+    let name = name.map(|s| s.trim()).filter(|s| !s.is_empty())?;
+    let tag = tag
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("latest");
+    Some(format!("{}:{}", name, tag))
+}
+
+/// Walk a docker-compose YAML and extract every `image:` directive value.
+/// Best-effort string parsing — no full YAML AST — but handles standard
+/// indented `image: foo:tag` and `image: "foo:tag"` forms.
+fn scrape_compose_images(yaml: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for line in yaml.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with('#') {
+            continue;
+        }
+        // Match a leading `image:` key — skip `image_*:` or label-like
+        // occurrences inside other keys.
+        let rest = match trimmed.strip_prefix("image:") {
+            Some(r) => r,
+            None => continue,
+        };
+        let value = rest.trim().trim_matches(|c| c == '"' || c == '\'');
+        if value.is_empty() {
+            continue;
+        }
+        // Skip variable-only refs we can't resolve.
+        if value.starts_with('$') {
+            continue;
+        }
+        out.push(value.to_string());
+    }
+    out.sort();
+    out.dedup();
+    out
 }
 
 /// Pick the first user-facing URL out of a Coolify service's compose YAML.
@@ -361,38 +439,71 @@ fn scrape_service_fqdn(yaml: &str) -> Option<String> {
 }
 
 fn extract_first_url(s: &str) -> Option<String> {
+    let mut search_from = 0;
     let bytes = s.as_bytes();
-    for scheme in ["https://", "http://"] {
-        if let Some(start) = s.find(scheme) {
-            let mut end = start + scheme.len();
-            while end < bytes.len() {
-                let b = bytes[end];
-                let is_url_char = b.is_ascii_alphanumeric()
-                    || matches!(
-                        b,
-                        b'.' | b'-'
-                            | b'_'
-                            | b'/'
-                            | b':'
-                            | b'?'
-                            | b'='
-                            | b'&'
-                            | b'%'
-                            | b'+'
-                            | b'~'
-                            | b'#'
-                    );
-                if !is_url_char {
-                    break;
-                }
-                end += 1;
+    while search_from < s.len() {
+        let rest = &s[search_from..];
+        let scheme_hit = ["https://", "http://"]
+            .iter()
+            .filter_map(|sc| rest.find(sc).map(|i| (i, *sc)))
+            .min_by_key(|(i, _)| *i);
+        let (rel_start, scheme) = match scheme_hit {
+            Some(v) => v,
+            None => return None,
+        };
+        let start = search_from + rel_start;
+        let mut end = start + scheme.len();
+        while end < bytes.len() {
+            let b = bytes[end];
+            let is_url_char = b.is_ascii_alphanumeric()
+                || matches!(
+                    b,
+                    b'.' | b'-'
+                        | b'_'
+                        | b'/'
+                        | b':'
+                        | b'?'
+                        | b'='
+                        | b'&'
+                        | b'%'
+                        | b'+'
+                        | b'~'
+                        | b'#'
+                );
+            if !is_url_char {
+                break;
             }
-            if end > start + scheme.len() {
-                return Some(s[start..end].trim_end_matches('/').to_string());
-            }
+            end += 1;
         }
+        if end > start + scheme.len() {
+            let candidate = s[start..end].trim_end_matches('/').to_string();
+            if !is_loopback_url(&candidate) {
+                return Some(candidate);
+            }
+            // Skip loopback (health-check internal URL) and keep searching.
+            search_from = end;
+            continue;
+        }
+        search_from = end;
     }
     None
+}
+
+fn is_loopback_url(url: &str) -> bool {
+    let lower = url.to_ascii_lowercase();
+    let host_start = lower
+        .find("://")
+        .map(|i| i + 3)
+        .unwrap_or(0);
+    let host_end = lower[host_start..]
+        .find(['/', ':', '?', '#'])
+        .map(|i| host_start + i)
+        .unwrap_or(lower.len());
+    let host = &lower[host_start..host_end];
+    matches!(
+        host,
+        "localhost" | "127.0.0.1" | "0.0.0.0" | "::1" | "host.docker.internal"
+    )
 }
 
 impl RawDatabase {
@@ -400,6 +511,12 @@ impl RawDatabase {
         let (project_uuid, project_name, environment_name) = unpack_environment(self.environment);
         let status = parse_status(self.status.as_deref().unwrap_or(""));
         let last_deployed_at = pick_last_deployed(self.last_online_at, self.updated_at);
+        let image = self.image.clone();
+        let image_refs = image
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+            .map(|s| vec![s.to_string()])
+            .unwrap_or_default();
         Resource {
             uuid: self.uuid.unwrap_or_default(),
             name: self.name.unwrap_or_default(),
@@ -409,7 +526,8 @@ impl RawDatabase {
             environment_name,
             status,
             fqdn: None,
-            image_ref: self.image,
+            image_ref: image,
+            image_refs,
             last_deployed_at,
             build_pack: None,
         }

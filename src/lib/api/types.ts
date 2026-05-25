@@ -20,7 +20,10 @@ export interface Resource {
   environment_name?: string;
   status: ResourceStatus;
   fqdn?: string;
+  /** Primary image:tag (single-image resources). */
   image_ref?: string;
+  /** All image:tag refs to watch for freshness (compose + single image). */
+  image_refs: string[];
   last_deployed_at?: string;
   build_pack?: string;
 }

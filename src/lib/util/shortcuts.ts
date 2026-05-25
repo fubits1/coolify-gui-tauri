@@ -1,16 +1,16 @@
 /**
  * Global keyboard shortcut handler.
  *
- * Install once from the root layout. The caller wires handlers to the
- * currently-selected resource (see `stores/resources.svelte.ts`). When no
- * resource is selected the caller should leave the relevant handler
- * undefined — the dispatcher then no-ops for that key.
+ * All bindings use the **Cmd+Shift+** (macOS) / **Ctrl+Shift+** (Win/Linux)
+ * prefix to dodge browser + OS conflicts. Earlier `⌘R` / `⌘D` etc. clashed
+ * with reload, bookmark, page-info, and address-bar — `⌘R` accidentally
+ * restarting a production container is unacceptable.
  *
- * Bindings (Cmd on macOS, Ctrl on Windows/Linux):
- *   ⌘R / Ctrl+R  → onRestart
- *   ⌘D / Ctrl+D  → onDeploy
- *   ⌘I / Ctrl+I  → onCheckImages
- *   ⌘L / Ctrl+L  → onLogs
+ * Bindings:
+ *   ⌘⇧R / Ctrl+Shift+R  → onRestart  (the unshifted ⌘R stays reload)
+ *   ⌘⇧D / Ctrl+Shift+D  → onDeploy
+ *   ⌘⇧I / Ctrl+Shift+I  → onCheckImages
+ *   ⌘⇧L / Ctrl+Shift+L  → onLogs
  *
  * Returns a cleanup function (idiomatic for `$effect` in Svelte 5).
  */
@@ -23,7 +23,7 @@ export interface ShortcutHandlers {
 
 export function installShortcuts(handlers: ShortcutHandlers): () => void {
   function onKey(e: KeyboardEvent) {
-    if (!(e.metaKey || e.ctrlKey)) return;
+    if (!(e.metaKey || e.ctrlKey) || !e.shiftKey) return;
     const key = e.key.toLowerCase();
     if (key === "r") {
       e.preventDefault();

@@ -1,0 +1,298 @@
+<h2>Overview screen — table vs cards</h2>
+<p class="subtitle">Click to pick. Same data, different density.</p>
+
+<div class="split">
+  <div class="mockup" data-choice="table" onclick="toggleSelect(this)">
+    <div class="mockup-header">A — Dense table (sortable)</div>
+    <div class="mockup-body">
+      <div
+        style="
+          display: flex;
+          gap: 8px;
+          padding: 8px;
+          border-bottom: 1px solid #444;
+          font-size: 11px;
+          color: #888;
+        "
+      >
+        <span>Search…</span
+        ><span style="margin-left: auto">Group: ▼ Project</span
+        ><span>Sort: ▼ Last deploy</span
+        ><span
+          style="
+            background: #2a5;
+            color: #fff;
+            padding: 2px 8px;
+            border-radius: 3px;
+          "
+          >Check all images</span
+        >
+      </div>
+      <table style="width: 100%; border-collapse: collapse; font-size: 12px">
+        <thead>
+          <tr style="background: #222; color: #aaa">
+            <th style="text-align: left; padding: 6px">Name</th>
+            <th>Type</th>
+            <th>Status</th>
+            <th>FQDN</th>
+            <th>Last deploy</th>
+            <th>Images</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr style="border-bottom: 1px solid #333">
+            <td style="padding: 6px">api-prod</td>
+            <td>App</td>
+            <td>
+              <span
+                style="
+                  background: #2a5;
+                  color: #fff;
+                  padding: 1px 6px;
+                  border-radius: 8px;
+                  font-size: 10px;
+                "
+                >running</span
+              >
+            </td>
+            <td>api.foo.dev</td>
+            <td>2h ago</td>
+            <td><span style="color: #fa3">2 stale</span></td>
+            <td>⟳ ⤴</td>
+          </tr>
+          <tr style="border-bottom: 1px solid #333">
+            <td style="padding: 6px">postgres-prod</td>
+            <td>DB</td>
+            <td>
+              <span
+                style="
+                  background: #2a5;
+                  color: #fff;
+                  padding: 1px 6px;
+                  border-radius: 8px;
+                  font-size: 10px;
+                "
+                >running</span
+              >
+            </td>
+            <td>—</td>
+            <td>14d ago</td>
+            <td><span style="color: #2a5">✓</span></td>
+            <td>⟳</td>
+          </tr>
+          <tr style="border-bottom: 1px solid #333">
+            <td style="padding: 6px">web-staging</td>
+            <td>App</td>
+            <td>
+              <span
+                style="
+                  background: #c33;
+                  color: #fff;
+                  padding: 1px 6px;
+                  border-radius: 8px;
+                  font-size: 10px;
+                "
+                >exited</span
+              >
+            </td>
+            <td>staging.foo.dev</td>
+            <td>3d ago</td>
+            <td><span style="color: #666">?</span></td>
+            <td>⟳ ⤴</td>
+          </tr>
+          <tr style="border-bottom: 1px solid #333">
+            <td style="padding: 6px">redis</td>
+            <td>Service</td>
+            <td>
+              <span
+                style="
+                  background: #fa3;
+                  color: #000;
+                  padding: 1px 6px;
+                  border-radius: 8px;
+                  font-size: 10px;
+                "
+                >degraded</span
+              >
+            </td>
+            <td>—</td>
+            <td>1mo ago</td>
+            <td><span style="color: #fa3">1 stale</span></td>
+            <td>⟳</td>
+          </tr>
+        </tbody>
+      </table>
+      <div style="font-size: 10px; color: #666; padding: 6px">
+        Click row → split detail pane opens right.
+      </div>
+    </div>
+  </div>
+
+  <div class="mockup" data-choice="cards" onclick="toggleSelect(this)">
+    <div class="mockup-header">B — Cards (1 per resource)</div>
+    <div
+      class="mockup-body"
+      style="
+        padding: 8px;
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 8px;
+      "
+    >
+      <div
+        style="
+          border: 1px solid #444;
+          border-radius: 6px;
+          padding: 8px;
+          font-size: 11px;
+        "
+      >
+        <div style="display: flex; justify-content: space-between">
+          <strong>api-prod</strong
+          ><span
+            style="
+              background: #2a5;
+              color: #fff;
+              padding: 1px 6px;
+              border-radius: 8px;
+              font-size: 10px;
+            "
+            >running</span
+          >
+        </div>
+        <div style="color: #888; margin-top: 4px">App · production</div>
+        <div style="color: #aaa; margin-top: 4px">api.foo.dev</div>
+        <div
+          style="
+            display: flex;
+            justify-content: space-between;
+            margin-top: 6px;
+            font-size: 10px;
+          "
+        >
+          <span style="color: #fa3">2 images stale</span><span>2h ago</span>
+        </div>
+        <div style="margin-top: 6px; display: flex; gap: 4px">
+          <span style="background: #333; padding: 2px 6px; border-radius: 3px"
+            >Restart</span
+          ><span style="background: #333; padding: 2px 6px; border-radius: 3px"
+            >Deploy</span
+          >
+        </div>
+      </div>
+      <div
+        style="
+          border: 1px solid #444;
+          border-radius: 6px;
+          padding: 8px;
+          font-size: 11px;
+        "
+      >
+        <div style="display: flex; justify-content: space-between">
+          <strong>postgres-prod</strong
+          ><span
+            style="
+              background: #2a5;
+              color: #fff;
+              padding: 1px 6px;
+              border-radius: 8px;
+              font-size: 10px;
+            "
+            >running</span
+          >
+        </div>
+        <div style="color: #888; margin-top: 4px">DB · production</div>
+        <div style="color: #aaa; margin-top: 4px">postgres:16</div>
+        <div
+          style="
+            display: flex;
+            justify-content: space-between;
+            margin-top: 6px;
+            font-size: 10px;
+          "
+        >
+          <span style="color: #2a5">✓ up to date</span><span>14d ago</span>
+        </div>
+        <div style="margin-top: 6px; display: flex; gap: 4px">
+          <span style="background: #333; padding: 2px 6px; border-radius: 3px"
+            >Restart</span
+          >
+        </div>
+      </div>
+      <div
+        style="
+          border: 1px solid #444;
+          border-radius: 6px;
+          padding: 8px;
+          font-size: 11px;
+        "
+      >
+        <div style="display: flex; justify-content: space-between">
+          <strong>web-staging</strong
+          ><span
+            style="
+              background: #c33;
+              color: #fff;
+              padding: 1px 6px;
+              border-radius: 8px;
+              font-size: 10px;
+            "
+            >exited</span
+          >
+        </div>
+        <div style="color: #888; margin-top: 4px">App · staging</div>
+        <div style="color: #aaa; margin-top: 4px">staging.foo.dev</div>
+        <div
+          style="
+            display: flex;
+            justify-content: space-between;
+            margin-top: 6px;
+            font-size: 10px;
+          "
+        >
+          <span style="color: #666">? not checked</span><span>3d ago</span>
+        </div>
+      </div>
+      <div
+        style="
+          border: 1px solid #444;
+          border-radius: 6px;
+          padding: 8px;
+          font-size: 11px;
+        "
+      >
+        <div style="display: flex; justify-content: space-between">
+          <strong>redis</strong
+          ><span
+            style="
+              background: #fa3;
+              color: #000;
+              padding: 1px 6px;
+              border-radius: 8px;
+              font-size: 10px;
+            "
+            >degraded</span
+          >
+        </div>
+        <div style="color: #888; margin-top: 4px">Service · prod</div>
+        <div style="color: #aaa; margin-top: 4px">redis:7-alpine</div>
+        <div
+          style="
+            display: flex;
+            justify-content: space-between;
+            margin-top: 6px;
+            font-size: 10px;
+          "
+        >
+          <span style="color: #fa3">1 stale</span><span>1mo ago</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<p class="subtitle">
+  Notes: badge palette — green=running, red=exited, amber=degraded/starting,
+  gray=excluded. Images badge: ✓ current, amber=newer available, ? unchecked.
+</p>

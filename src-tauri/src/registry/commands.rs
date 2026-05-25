@@ -58,18 +58,10 @@ async fn check_via_hub_api(image_ref: &str) -> Result<ImageCacheEntry, String> {
         .and_then(hub::primary_digest_for)
         .unwrap_or_default();
 
-    // `results` is ordered last_updated DESC. The first entry is the
-    // newest published tag — that's the upstream reference we compare
-    // against. If the current tag IS the newest (same name), there is
-    // by definition nothing newer.
     let newest = page.results.first();
     let latest_digest = match newest {
         Some(t) if t.name != current_tag => hub::primary_digest_for(t),
         Some(_) => {
-            // Current tag IS the newest published tag in the repo. Mark the
-            // latest_digest explicitly (= current digest) so a downstream
-            // `latest_digest == None` test can distinguish "we know it's
-            // current" from "legacy cache entry that never got populated".
             if current_digest.is_empty() {
                 None
             } else {
@@ -79,6 +71,19 @@ async fn check_via_hub_api(image_ref: &str) -> Result<ImageCacheEntry, String> {
         None => None,
     };
 
+    // For `:latest`-pinned images, the publish timestamp of the user's CURRENT
+    // tag is what tells us "is the registry's current :latest newer than what
+    // the user has deployed?". For pinned-version tags, the newest tag's
+    // last_updated is what matters.
+    let timestamp_source = if current_tag == "latest" {
+        page.results.iter().find(|t| t.name == "latest")
+    } else {
+        newest
+    };
+    let latest_pushed_at = timestamp_source
+        .and_then(|t| t.last_updated.as_deref())
+        .and_then(parse_hub_timestamp);
+
     let highest_semver_tag = pick_highest_semver(
         &page.results.iter().map(|t| t.name.clone()).collect::<Vec<_>>(),
     );
@@ -87,8 +92,16 @@ async fn check_via_hub_api(image_ref: &str) -> Result<ImageCacheEntry, String> {
         digest: current_digest,
         latest_digest,
         highest_semver_tag,
+        latest_pushed_at,
         checked_at: Utc::now().timestamp_millis(),
     })
+}
+
+/// Hub API timestamps are RFC 3339 (`"2026-04-27T17:14:09.123456Z"`).
+fn parse_hub_timestamp(s: &str) -> Option<i64> {
+    chrono::DateTime::parse_from_rfc3339(s)
+        .ok()
+        .map(|d| d.with_timezone(&Utc).timestamp_millis())
 }
 
 /// Fallback OCI Distribution v2 path for non-Docker-Hub registries
@@ -118,6 +131,7 @@ async fn check_via_oci(image_ref: &str) -> Result<ImageCacheEntry, String> {
         digest: current_digest,
         latest_digest,
         highest_semver_tag,
+        latest_pushed_at: None,
         checked_at: Utc::now().timestamp_millis(),
     })
 }

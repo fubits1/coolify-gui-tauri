@@ -55,6 +55,10 @@ Props:
   const staleCount = $derived(
     rows.filter((r) => imageCache.isStale(r.ref) === "newer-available").length,
   );
+  const unknownCount = $derived(
+    rows.filter((r) => imageCache.isStale(r.ref) === "unknown").length,
+  );
+  const freshCount = $derived(rows.length - staleCount - unknownCount);
 
   function shortDigest(d: string | undefined): string {
     if (!d) return "—";
@@ -114,10 +118,14 @@ Props:
   <div class="flex flex-col gap-3 p-4">
     <div class="flex items-center justify-between">
       <div class="text-sm text-muted-foreground">
-        {#if staleCount === 0}
-          All {rows.length} image{rows.length === 1 ? "" : "s"} up to date.
+        {#if staleCount > 0}
+          {staleCount} of {rows.length} image{rows.length === 1 ? " has" : "s have"} a newer version available.
+        {:else if unknownCount === rows.length}
+          {rows.length === 1 ? "Image" : "All images"} pinned to a floating tag ({rows.length === 1 ? ":latest" : "e.g. :latest"}) — drift can't be determined.
+        {:else if unknownCount > 0}
+          {freshCount} up to date · {unknownCount} with unknown drift (floating tag).
         {:else}
-          {staleCount} of {rows.length} image{rows.length === 1 ? "" : "s"} have a newer version available.
+          All {rows.length} image{rows.length === 1 ? "" : "s"} up to date.
         {/if}
       </div>
       <Button size="sm" variant="outline" onclick={checkAll}>

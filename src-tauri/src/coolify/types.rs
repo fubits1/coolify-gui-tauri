@@ -213,6 +213,15 @@ pub(crate) struct RawApplication {
     // `parse_loose_datetime` in `into_resource`.
     pub last_online_at: Option<String>,
     pub updated_at: Option<String>,
+    /// MySQL-style datetime when the container was last restarted. Coolify
+    /// sets this on both manual restarts AND deploys — use
+    /// `last_restart_type` to disambiguate.
+    pub last_restart_at: Option<String>,
+    /// Categorises what triggered `last_restart_at`. Known values include
+    /// `"deploy"` (real redeploy), `"manual"`, `"restart"`, etc. When the
+    /// value is `"deploy"`, `last_restart_at` is effectively the last
+    /// deployment timestamp — saves a per-app /deployments lookup.
+    pub last_restart_type: Option<String>,
     pub environment: Option<RawEnvironment>,
     pub destination: Option<RawDestination>,
 }
@@ -339,7 +348,27 @@ impl RawApplication {
     pub(crate) fn into_resource(self) -> Resource {
         let (project_uuid, project_name, environment_name) = unpack_environment(self.environment);
         let status = parse_status(self.status.as_deref().unwrap_or(""));
-        let last_deployed_at = pick_last_deployed(self.last_online_at, self.updated_at);
+        // last_online_at is the heartbeat (constantly refreshed for running
+        // containers). updated_at gets bumped on status reconciliation,
+        // NOT just real deploys (confirmed by user reports of "just now"
+        // on never-redeployed resources).
+        //
+        // BEST FREE signal in the list response is last_restart_at +
+        // last_restart_type. Coolify sets last_restart_type="deploy" when
+        // the restart was triggered by a deployment — that timestamp IS
+        // the last deploy. ops::list_resources can still OVERRIDE with the
+        // exact /deployments record when its 5-min cache has a value.
+        let last_online_only = pick_last_deployed(self.last_online_at, None);
+        let restart_was_deploy = self
+            .last_restart_type
+            .as_deref()
+            .map(|t| t.eq_ignore_ascii_case("deploy"))
+            .unwrap_or(false);
+        let last_deploy_from_restart = if restart_was_deploy {
+            pick_last_deployed(self.last_restart_at, None)
+        } else {
+            None
+        };
         // Image refs: prefer registry image (build_pack=dockerimage), else
         // scrape compose YAML (build_pack=dockercompose). Git-built apps
         // have no static image ref to watch.
@@ -365,8 +394,11 @@ impl RawApplication {
             fqdn: self.fqdn,
             image_ref: single_image,
             image_refs,
-            last_online_at: last_deployed_at,
-            last_deployed_at: None,
+            last_online_at: last_online_only,
+            // Prefer last_restart_at when last_restart_type=="deploy"
+            // (free signal from list response). ops::list_resources may
+            // override with the more precise /deployments timestamp.
+            last_deployed_at: last_deploy_from_restart,
             build_pack: self.build_pack,
         }
     }

@@ -20,7 +20,12 @@ pub struct ImageCacheEntry {
     pub digest: String,
     pub latest_digest: Option<String>,
     pub highest_semver_tag: Option<String>,
-    /// Unix seconds.
+    /// Epoch milliseconds — when the registry's newest tag was published.
+    /// Compare against a resource's `last_deployed_at` to decide whether a
+    /// `:latest`-pinned container is likely outdated.
+    #[serde(default)]
+    pub latest_pushed_at: Option<i64>,
+    /// Epoch milliseconds — when we last hit the registry for this image.
     pub checked_at: i64,
 }
 

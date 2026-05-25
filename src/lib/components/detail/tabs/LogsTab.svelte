@@ -38,32 +38,26 @@ Props:
 		instanceUrl?: string | null;
 	} = $props();
 
-	const isLogsSupported = $derived(kind === "Application" || kind === "application");
+	// Logs feature is intentionally disabled in v1. Even for Applications,
+	// the per-resource fetch (5s poll × N resources) hammers Coolify
+	// instances behind Cloudflare and triggers 429 rate limits that cascade
+	// across the whole UI. The Coolify dashboard's own terminal view is
+	// the right home for logs — we just deep-link there.
+	const isLogsSupported = false;
 
 	/**
-	 * Build the Coolify dashboard URL for this resource. Coolify routes
-	 * resource pages at predictable plural-kind paths:
-	 *   `{base}/applications/{uuid}`
-	 *   `{base}/services/{uuid}`
-	 *   `{base}/databases/{uuid}`
+	 * Build a Coolify dashboard URL. Coolify uses Livewire-driven SPA
+	 * routing where the URL bar may not change even when navigating into
+	 * a resource (verified against cf.fubits.dev — clicking into a
+	 * resource leaves the browser URL on the instance root). So a true
+	 * deep-link isn't possible without `project_uuid` + `environment_name`
+	 * which list endpoints don't ship.
 	 *
-	 * The longer `project/{project_uuid}/{env}/...` form is what the
-	 * dashboard ITSELF uses internally, but the short form 302-redirects
-	 * to it, so we use the short form to avoid depending on data the
-	 * list endpoints don't ship (environment_name, project_uuid — see
-	 * docs/coolify-api.md).
+	 * Best effort: open the instance root. The user navigates manually.
 	 */
 	const dashboardUrl = $derived.by(() => {
 		if (!instanceUrl) return null;
-		const base = instanceUrl.replace(/\/$/, "");
-		const kindLower = kind.toLowerCase();
-		const segment =
-			kindLower === "service"
-				? "services"
-				: kindLower === "database"
-					? "databases"
-					: "applications";
-		return `${base}/${segment}/${uuid}`;
+		return instanceUrl.replace(/\/$/, "");
 	});
 
 
@@ -141,20 +135,47 @@ Props:
 	 */
 	const SCROLL_STICKY_THRESHOLD_PX = 24;
 
+	/**
+	 * Coolify forwards `?timestamps=true` to `docker logs`, producing lines
+	 * prefixed with `2026-05-25T21:30:45.123456789Z `. Normalize to
+	 * `2026-05-25 21:30:45 ` (human-readable, second precision, space
+	 * separator) — matches how the user sees Coolify-side timestamps.
+	 * Lines that already have a non-Docker prefix (e.g. an app's own
+	 * structured logger) are passed through untouched.
+	 */
+	function humanizeTimestamps(raw: string): string {
+		const rfc3339 = /^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2}:\d{2})(?:\.\d+)?Z?\s?/;
+		return raw
+			.split("\n")
+			.map((line) => line.replace(rfc3339, "$1 $2 "))
+			.join("\n");
+	}
+
 	async function refresh(interactive: boolean) {
-		loading = true;
+		// Only flip the spinner/Loading label for interactive or first-load
+		// refreshes. Auto-poll every 5s shouldn't make the Refresh button
+		// flicker between "Loading…" and "Refresh" forever.
+		const showLoading = interactive || lastRefreshAt == null;
+		if (showLoading) loading = true;
 		try {
-			const next = await api.tailLogs(
+			const raw = await api.tailLogs(
 				uuid,
 				kind,
 				500,
 				selectedContainer || undefined,
 			);
+			const next = humanizeTimestamps(raw);
+			// Successful fetch — clear stale error + bump refresh timestamp
+			// BEFORE any early-return optimizations so the UI doesn't sit
+			// at "refreshed never" forever when the body is empty.
 			lastErrorMsg = null;
 			lastRefreshAt = Date.now();
-			// Skip the reassignment entirely when content hasn't changed —
-			// otherwise every 5s poll forces Svelte to re-render the entire
-			// <pre> + scroll jumps to bottom even when there's no diff.
+			// Empty response from an auto-poll = preserve whatever we have
+			// (transient — container restarting, log rotation). Manual
+			// refresh allows the clear.
+			if (next.length === 0 && text.length > 0 && !interactive) return;
+			// No content diff → skip the reassignment to avoid Svelte
+			// re-rendering the whole <pre> + scroll jump.
 			if (next === text) return;
 			// Preserve the user's scroll position unless they're already
 			// pinned to the bottom (typical "follow log" intent).
@@ -172,7 +193,7 @@ Props:
 				toast.error("Failed to load logs", msg);
 			}
 		} finally {
-			loading = false;
+			if (showLoading) loading = false;
 		}
 	}
 
@@ -202,21 +223,29 @@ Props:
 	<div
 		class="flex flex-col items-center gap-3 rounded-md border border-dashed border-border bg-muted/10 px-4 py-8 text-center text-sm text-muted-foreground"
 	>
-		<p class="font-medium">Logs are not available for {kind}s via the Coolify API.</p>
+		<p class="font-medium">Logs live in the Coolify dashboard.</p>
 		<p class="text-xs">
-			Coolify only exposes
-			<code class="font-mono">/applications/&#123;uuid&#125;/logs</code>. Use the
-			Coolify dashboard's terminal view for container logs.
+			Per-resource log polling against a Cloudflare-fronted Coolify
+			triggers 429 rate limits that cascade across the whole UI. Open
+			the resource in the Coolify dashboard to use its built-in
+			terminal view.
 		</p>
 		{#if dashboardUrl}
-			<a
-				class="inline-flex items-center gap-1.5 rounded-md border border-border bg-background px-3 py-1.5 text-xs font-medium text-foreground hover:bg-accent"
-				href={dashboardUrl}
-				target="_blank"
-				rel="noopener noreferrer"
-			>
-				Open in Coolify dashboard ↗
-			</a>
+			<div class="flex flex-col items-center gap-1">
+				<a
+					class="inline-flex items-center gap-1.5 rounded-md border border-border bg-background px-3 py-1.5 text-xs font-medium text-foreground hover:bg-accent"
+					href={dashboardUrl}
+					target="_blank"
+					rel="noopener noreferrer"
+				>
+					Open Coolify dashboard ↗
+				</a>
+				<span class="text-[0.65rem] text-muted-foreground">
+					Coolify's dashboard uses Livewire SPA routing — no
+					per-resource deep-link is possible. Navigate to this
+					resource manually.
+				</span>
+			</div>
 		{/if}
 	</div>
 {:else}

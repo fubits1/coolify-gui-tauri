@@ -138,30 +138,8 @@ pub async fn list_resources(
     let apps_fut = client.get::<Vec<RawApplication>>("api/v1/applications");
     let svcs_fut = client.get::<Vec<RawService>>("api/v1/services");
     let dbs_fut = client.get::<Vec<RawDatabase>>("api/v1/databases");
-    // One-shot diagnostic for the /resources endpoint — Coolify lists it in
-    // its API sidebar but the doc page is opaque. Logging the first item's
-    // keys lets us see if it ships project context per resource, which the
-    // typed list endpoints don't.
-    let resources_diag_fut = client.get::<serde_json::Value>("api/v1/resources");
 
-    let (apps, svcs, dbs, resources_diag) = tokio::join!(apps_fut, svcs_fut, dbs_fut, resources_diag_fut);
-    if let Ok(v) = &resources_diag {
-        if let Some(first) = v.as_array().and_then(|a| a.first()) {
-            let keys: Vec<&str> = first
-                .as_object()
-                .map(|o| o.keys().map(|s| s.as_str()).collect())
-                .unwrap_or_default();
-            tracing::warn!("DIAG /resources[0] keys: {:?}", keys);
-        } else if v.is_object() {
-            let keys: Vec<&str> = v
-                .as_object()
-                .map(|o| o.keys().map(|s| s.as_str()).collect())
-                .unwrap_or_default();
-            tracing::warn!("DIAG /resources object keys: {:?}", keys);
-        }
-    } else if let Err(e) = &resources_diag {
-        tracing::warn!("DIAG /resources failed: {}", e);
-    }
+    let (apps, svcs, dbs) = tokio::join!(apps_fut, svcs_fut, dbs_fut);
 
     let mut out: Vec<Resource> = Vec::new();
     let mut errors: std::collections::HashMap<String, String> =
@@ -180,7 +158,13 @@ pub async fn list_resources(
             let uuids: Vec<String> = resources.iter().map(|r| r.uuid.clone()).collect();
             let deploys = fetch_last_deployments(&client, &state, &uuids).await;
             for mut r in resources {
-                r.last_deployed_at = deploys.get(&r.uuid).cloned().flatten();
+                // Only OVERRIDE the updated_at fallback when the deploys
+                // lookup actually returned a timestamp. A None means
+                // either no deploy history yet OR a transient 429 — in
+                // both cases the updated_at value is better than "—".
+                if let Some(Some(ts)) = deploys.get(&r.uuid).cloned() {
+                    r.last_deployed_at = Some(ts);
+                }
                 out.push(r);
             }
         }
@@ -257,6 +241,16 @@ pub async fn get_resource_detail(
     let client = clone_client(&state).await?;
     let path = format!("api/v1/{}/{}", resource_kind.path_segment(), uuid);
     let raw: serde_json::Value = client.get(&path).await.map_err(|e| e.to_string())?;
+    // Diagnostic: dump environment-related fields so we can locate
+    // project_uuid + environment_uuid for the dashboard deep-link URL.
+    tracing::warn!(
+        "DIAG detail {}/{} environment_id={:?} environment={:?} project={:?}",
+        kind,
+        uuid,
+        raw.get("environment_id"),
+        raw.get("environment"),
+        raw.get("project"),
+    );
     Ok(build_detail(raw, resource_kind))
 }
 
@@ -438,6 +432,11 @@ pub async fn tail_logs(
         .ok_or_else(|| format!("unknown resource kind: {}", kind))?;
     let path = match resource_kind {
         ResourceKind::Application => {
+            // Coolify v1 only documents `lines`. Adding `&timestamps=true`
+            // causes network errors against `cf.fubits.dev` (verified via
+            // tracing logs) — likely a routing/CSRF mismatch. Drop it; the
+            // frontend `humanizeTimestamps` still normalizes any RFC 3339
+            // prefixes the container itself ships.
             format!("api/v1/applications/{}/logs?lines={}", uuid, capped)
         }
         ResourceKind::Service | ResourceKind::Database => {
@@ -491,7 +490,9 @@ async fn fetch_last_deployments(
 ) -> std::collections::HashMap<String, Option<chrono::DateTime<chrono::Utc>>> {
     use std::time::{Duration, Instant};
 
-    const TTL: Duration = Duration::from_secs(60);
+    // 5min cache — Coolify behind Cloudflare 429s aggressively when we hit
+    // /deployments/applications/{uuid} per resource on every list refresh.
+    const TTL: Duration = Duration::from_secs(300);
     let now = Instant::now();
 
     // Phase 1: drain anything still fresh from the cache.

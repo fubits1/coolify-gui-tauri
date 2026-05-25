@@ -153,9 +153,23 @@ pub struct ResourceDetail {
     pub git_commit_sha: Option<String>,
     pub ports_exposes: Option<String>,
     pub docker_compose_raw: Option<String>,
+    pub install_command: Option<String>,
+    pub build_command: Option<String>,
+    pub start_command: Option<String>,
+    pub base_directory: Option<String>,
+    pub publish_directory: Option<String>,
+    pub dockerfile: Option<String>,
+    pub dockerfile_location: Option<String>,
+    pub dockerfile_target_build: Option<String>,
+    pub watch_paths: Option<String>,
     pub env_vars: Vec<EnvVar>,
     pub healthcheck: Option<HealthCheck>,
     pub server_name: Option<String>,
+    /// Per-container handles for Service resources — empty for Applications +
+    /// Databases. Each entry's `uuid` is the value to pass to `tail_logs`
+    /// for per-container log retrieval.
+    #[serde(default)]
+    pub service_containers: Vec<ServiceContainer>,
 }
 
 // ── Raw Coolify response shapes (internal, deserialise-only) ────────────────
@@ -218,6 +232,21 @@ pub(crate) struct RawService {
 #[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 pub(crate) struct RawServiceContainerFqdn {
+    pub uuid: Option<String>,
+    pub name: Option<String>,
+    pub image: Option<String>,
+    pub fqdn: Option<String>,
+}
+
+/// One container inside a Coolify Service, surfaced to the frontend so the
+/// Logs tab can build a name→uuid dropdown that hits per-container log
+/// endpoints (Coolify routes service-container logs through the
+/// `/applications/{uuid}/logs` path using the container's own uuid).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServiceContainer {
+    pub uuid: String,
+    pub name: String,
+    pub image: Option<String>,
     pub fqdn: Option<String>,
 }
 

@@ -19,11 +19,23 @@ pub struct DeployCacheEntry {
     pub fetched_at: Instant,
 }
 
+/// Per-service FQDN cached from `/services/{uuid}/envs` lookup. Coolify
+/// service compose templates often declare `SERVICE_URL_<NAME>_<PORT>` as
+/// an env pass-through variable; the actual URL lives only in the env
+/// store, never in `docker_compose_raw`. We resolve that out-of-band
+/// and cache for 60s to avoid hammering Coolify on every poll.
+#[derive(Debug, Clone)]
+pub struct ServiceFqdnEntry {
+    pub fqdn: Option<String>,
+    pub fetched_at: Instant,
+}
+
 /// Tauri-managed application state holding the active Coolify HTTP client
 /// and the per-app last-deployment cache.
 pub struct AppState {
     pub client: RwLock<Option<CoolifyClient>>,
     pub deploy_cache: RwLock<HashMap<String, DeployCacheEntry>>,
+    pub service_fqdn_cache: RwLock<HashMap<String, ServiceFqdnEntry>>,
 }
 
 impl AppState {
@@ -31,6 +43,7 @@ impl AppState {
         Self {
             client: RwLock::new(None),
             deploy_cache: RwLock::new(HashMap::new()),
+            service_fqdn_cache: RwLock::new(HashMap::new()),
         }
     }
 }

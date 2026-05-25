@@ -138,8 +138,30 @@ pub async fn list_resources(
     let apps_fut = client.get::<Vec<RawApplication>>("api/v1/applications");
     let svcs_fut = client.get::<Vec<RawService>>("api/v1/services");
     let dbs_fut = client.get::<Vec<RawDatabase>>("api/v1/databases");
+    // One-shot diagnostic for the /resources endpoint — Coolify lists it in
+    // its API sidebar but the doc page is opaque. Logging the first item's
+    // keys lets us see if it ships project context per resource, which the
+    // typed list endpoints don't.
+    let resources_diag_fut = client.get::<serde_json::Value>("api/v1/resources");
 
-    let (apps, svcs, dbs) = tokio::join!(apps_fut, svcs_fut, dbs_fut);
+    let (apps, svcs, dbs, resources_diag) = tokio::join!(apps_fut, svcs_fut, dbs_fut, resources_diag_fut);
+    if let Ok(v) = &resources_diag {
+        if let Some(first) = v.as_array().and_then(|a| a.first()) {
+            let keys: Vec<&str> = first
+                .as_object()
+                .map(|o| o.keys().map(|s| s.as_str()).collect())
+                .unwrap_or_default();
+            tracing::warn!("DIAG /resources[0] keys: {:?}", keys);
+        } else if v.is_object() {
+            let keys: Vec<&str> = v
+                .as_object()
+                .map(|o| o.keys().map(|s| s.as_str()).collect())
+                .unwrap_or_default();
+            tracing::warn!("DIAG /resources object keys: {:?}", keys);
+        }
+    } else if let Err(e) = &resources_diag {
+        tracing::warn!("DIAG /resources failed: {}", e);
+    }
 
     let mut out: Vec<Resource> = Vec::new();
     let mut errors: std::collections::HashMap<String, String> =
@@ -170,7 +192,25 @@ pub async fn list_resources(
     match svcs {
         Ok(list) => {
             tracing::debug!("list_resources: /services -> {} items", list.len());
-            out.extend(list.into_iter().map(RawService::into_resource));
+            let resources: Vec<Resource> = list.into_iter().map(RawService::into_resource).collect();
+            // For services whose FQDN we couldn't scrape from the compose YAML
+            // (Coolify nocodb-style templates only declare SERVICE_URL_* as
+            // env passthroughs), fall back to the per-service envs endpoint
+            // and look for a URL there.
+            let needing_fqdn: Vec<String> = resources
+                .iter()
+                .filter(|r| r.fqdn.is_none() || r.fqdn.as_deref().map(|s| s.is_empty()).unwrap_or(true))
+                .map(|r| r.uuid.clone())
+                .collect();
+            let resolved = fetch_service_fqdns(&client, &state, &needing_fqdn).await;
+            for mut r in resources {
+                if r.fqdn.as_deref().map(|s| s.is_empty()).unwrap_or(true) {
+                    if let Some(Some(url)) = resolved.get(&r.uuid).cloned() {
+                        r.fqdn = Some(url);
+                    }
+                }
+                out.push(r);
+            }
         }
         Err(e) => {
             tracing::warn!("list_resources: /services failed: {}", e);
@@ -383,15 +423,37 @@ pub async fn tail_logs(
     uuid: String,
     kind: String,
     lines: u32,
+    container: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<String, String> {
-    let segment = action_segment(&kind)?;
     let capped = lines.min(5000);
     let client = clone_client(&state).await?;
-    let path = format!("api/v1/{}/{}/logs?lines={}", segment, uuid, capped);
-    // Coolify returns JSON `{"logs": "<text>"}`, not plain text. Decode
-    // accordingly; if the call 404s (services without log support) bubble
-    // a friendly message instead of the raw error.
+
+    // The Coolify v1 API only exposes a logs endpoint under
+    // /applications/{uuid}/logs. Services + Databases have NO documented
+    // logs endpoint. The dashboard streams container logs out-of-band
+    // (likely SSH/docker-exec through the Soketi WebSocket). For now,
+    // surface this gap explicitly rather than 404-chasing.
+    let resource_kind = ResourceKind::from_str(&kind)
+        .ok_or_else(|| format!("unknown resource kind: {}", kind))?;
+    let path = match resource_kind {
+        ResourceKind::Application => {
+            format!("api/v1/applications/{}/logs?lines={}", uuid, capped)
+        }
+        ResourceKind::Service | ResourceKind::Database => {
+            let _ = container; // ignored — see above
+            return Err(format!(
+                "The Coolify v1 API does not expose a logs endpoint for {} resources. \
+                 Use the Coolify dashboard for now.",
+                if matches!(resource_kind, ResourceKind::Service) {
+                    "service"
+                } else {
+                    "database"
+                }
+            ));
+        }
+    };
+
     let raw: Result<serde_json::Value, _> = client.get(&path).await;
     match raw {
         Ok(v) => Ok(v
@@ -400,7 +462,7 @@ pub async fn tail_logs(
             .map(|s| s.to_string())
             .unwrap_or_default()),
         Err(crate::coolify::client::CoolifyError::NotFound) => {
-            Err("Logs are not available for this resource type via the Coolify API".to_string())
+            Err(format!("404 at {}", path))
         }
         Err(e) => Err(e.to_string()),
     }
@@ -504,6 +566,125 @@ fn extract_first_deployment_timestamp(
         .or_else(|| if v.is_object() { Some(v) } else { None })?;
     let raw = first.get("created_at").and_then(|x| x.as_str())?;
     parse_loose_datetime(raw)
+}
+
+/// Look up `SERVICE_URL_*` / `SERVICE_FQDN_*` env-var VALUES for each
+/// service uuid (via `/services/{uuid}/envs`), cached for 60s. Returns
+/// `uuid -> Some(url)` when a URL-looking value is found, else `None`.
+async fn fetch_service_fqdns(
+    client: &CoolifyClient,
+    state: &State<'_, AppState>,
+    uuids: &[String],
+) -> std::collections::HashMap<String, Option<String>> {
+    use std::time::{Duration, Instant};
+    const TTL: Duration = Duration::from_secs(60);
+    let now = Instant::now();
+
+    let mut out: std::collections::HashMap<String, Option<String>> =
+        std::collections::HashMap::new();
+    let mut to_fetch: Vec<String> = Vec::new();
+    {
+        let cache = state.service_fqdn_cache.read().await;
+        for uuid in uuids {
+            match cache.get(uuid) {
+                Some(entry) if now.duration_since(entry.fetched_at) < TTL => {
+                    out.insert(uuid.clone(), entry.fqdn.clone());
+                }
+                _ => to_fetch.push(uuid.clone()),
+            }
+        }
+    }
+
+    if to_fetch.is_empty() {
+        return out;
+    }
+
+    let mut futs = Vec::with_capacity(to_fetch.len());
+    for uuid in &to_fetch {
+        let client = client.clone();
+        let uuid = uuid.clone();
+        futs.push(async move {
+            let path = format!("api/v1/services/{}/envs", uuid);
+            let res: Result<serde_json::Value, _> = client.get(&path).await;
+            let fqdn = match res {
+                Ok(v) => extract_service_url_from_envs(&v),
+                Err(_) => None,
+            };
+            (uuid, fqdn)
+        });
+    }
+    let results = futures::future::join_all(futs).await;
+
+    let mut cache = state.service_fqdn_cache.write().await;
+    let fetched_at = Instant::now();
+    for (uuid, fqdn) in results {
+        cache.insert(
+            uuid.clone(),
+            super::ServiceFqdnEntry {
+                fqdn: fqdn.clone(),
+                fetched_at,
+            },
+        );
+        out.insert(uuid, fqdn);
+    }
+    out
+}
+
+/// Walk an `/envs` response (bare array of env-var objects) and pull the
+/// first value that LOOKS like a URL out of a `SERVICE_URL_*` or
+/// `SERVICE_FQDN_*` key. Loopback hosts are filtered out — those are
+/// health-check internal URLs, not the user-facing FQDN.
+fn extract_service_url_from_envs(v: &serde_json::Value) -> Option<String> {
+    let arr = v
+        .as_array()
+        .or_else(|| v.get("data").and_then(|d| d.as_array()))?;
+    let mut prod_url: Option<String> = None;
+    let mut any_url: Option<String> = None;
+    for item in arr {
+        let key = match item.get("key").and_then(|x| x.as_str()) {
+            Some(k) => k,
+            None => continue,
+        };
+        let upper = key.to_ascii_uppercase();
+        if !upper.starts_with("SERVICE_URL_") && !upper.starts_with("SERVICE_FQDN_") {
+            continue;
+        }
+        let value = item
+            .get("real_value")
+            .and_then(|x| x.as_str())
+            .or_else(|| item.get("value").and_then(|x| x.as_str()))
+            .unwrap_or("")
+            .trim();
+        if value.is_empty() {
+            continue;
+        }
+        // Coerce bare hostnames into https:// URLs.
+        let url = if value.starts_with("http://") || value.starts_with("https://") {
+            value.to_string()
+        } else {
+            format!("https://{}", value)
+        };
+        // Skip loopback.
+        let lower = url.to_ascii_lowercase();
+        if lower.contains("://localhost")
+            || lower.contains("://127.0.0.1")
+            || lower.contains("://0.0.0.0")
+        {
+            continue;
+        }
+        // Prefer production scope (is_preview=false) over preview duplicates.
+        let is_preview = item
+            .get("is_preview")
+            .and_then(|x| x.as_bool())
+            .unwrap_or(false);
+        if !is_preview && prod_url.is_none() {
+            prod_url = Some(url.clone());
+        }
+        if any_url.is_none() {
+            any_url = Some(url);
+        }
+    }
+    prod_url.or(any_url)
 }
 
 fn parse_loose_datetime(s: &str) -> Option<chrono::DateTime<chrono::Utc>> {
@@ -635,6 +816,48 @@ fn build_detail(raw: serde_json::Value, kind: ResourceKind) -> ResourceDetail {
         .get("health_check")
         .and_then(|v| serde_json::from_value::<HealthCheck>(v.clone()).ok());
 
+    // Service containers: Coolify's GET /services/{uuid} response nests
+    // each compose service under `applications` (HTTP services) and
+    // `databases` (stateful services). Each item carries its own coolify
+    // uuid — that's the value the per-container logs endpoint
+    // (/applications/{uuid}/logs) expects.
+    let mut service_containers: Vec<crate::coolify::types::ServiceContainer> = Vec::new();
+    for arr_key in [
+        "applications",
+        "databases",
+        // Legacy variants — kept for older Coolify versions.
+        "service_applications",
+        "service_databases",
+    ] {
+        if let Some(arr) = raw.get(arr_key).and_then(|v| v.as_array()) {
+            for item in arr {
+                let uuid = match item.get("uuid").and_then(|x| x.as_str()) {
+                    Some(s) if !s.is_empty() => s.to_string(),
+                    _ => continue,
+                };
+                let name = item
+                    .get("name")
+                    .and_then(|x| x.as_str())
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| uuid.clone());
+                let image = item
+                    .get("image")
+                    .and_then(|x| x.as_str())
+                    .map(|s| s.to_string());
+                let fqdn = item
+                    .get("fqdn")
+                    .and_then(|x| x.as_str())
+                    .map(|s| s.to_string());
+                service_containers.push(crate::coolify::types::ServiceContainer {
+                    uuid,
+                    name,
+                    image,
+                    fqdn,
+                });
+            }
+        }
+    }
+
     ResourceDetail {
         uuid,
         name,
@@ -652,9 +875,19 @@ fn build_detail(raw: serde_json::Value, kind: ResourceKind) -> ResourceDetail {
         git_commit_sha: get_str(&raw, "git_commit_sha"),
         ports_exposes: get_str(&raw, "ports_exposes"),
         docker_compose_raw: get_str(&raw, "docker_compose_raw"),
+        install_command: get_str(&raw, "install_command"),
+        build_command: get_str(&raw, "build_command"),
+        start_command: get_str(&raw, "start_command"),
+        base_directory: get_str(&raw, "base_directory"),
+        publish_directory: get_str(&raw, "publish_directory"),
+        dockerfile: get_str(&raw, "dockerfile"),
+        dockerfile_location: get_str(&raw, "dockerfile_location"),
+        dockerfile_target_build: get_str(&raw, "dockerfile_target_build"),
+        watch_paths: get_str(&raw, "watch_paths"),
         env_vars,
         healthcheck,
         server_name,
+        service_containers,
     }
 }
 

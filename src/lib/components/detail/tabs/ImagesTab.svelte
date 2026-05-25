@@ -114,57 +114,54 @@ Props:
       </Button>
     </div>
 
-    <div class="rounded-md border border-border">
-      <table class="w-full text-sm">
-        <thead class="bg-muted/40 text-xs text-muted-foreground">
-          <tr>
-            <th class="px-3 py-2 text-left font-medium">Service</th>
-            <th class="px-3 py-2 text-left font-medium">Image</th>
-            <th class="px-3 py-2 text-left font-medium">Tag</th>
-            <th class="px-3 py-2 text-left font-mono">Digest</th>
-            <th class="px-3 py-2 text-left font-mono">Latest</th>
-            <th class="px-3 py-2 text-left font-medium">State</th>
-            <th class="px-3 py-2 text-right font-medium">Action</th>
-          </tr>
-        </thead>
-        <tbody>
-          {#each rows as row (row.ref)}
-            {@const entry = imageCache.entries[row.ref]}
-            {@const state = imageCache.isStale(row.ref)}
-            {@const view = badgeFor(state)}
-            {@const isChecking = imageCache.checking.has(row.ref)}
-            <tr class="border-t border-border">
-              <td class="px-3 py-2">{row.service}</td>
-              <td class="px-3 py-2 font-mono text-xs">{row.image}</td>
-              <td class="px-3 py-2 font-mono text-xs">{row.tag}</td>
-              <td class="px-3 py-2 font-mono text-xs" title={entry?.digest ?? ""}>
-                {shortDigest(entry?.digest)}
-              </td>
-              <td
-                class="px-3 py-2 font-mono text-xs"
-                title={entry?.latest_digest ?? ""}
-              >
-                {shortDigest(entry?.latest_digest)}
-              </td>
-              <td class="px-3 py-2">
-                <Badge variant="default" class={view.class}>
-                  {view.label}
-                </Badge>
-              </td>
-              <td class="px-3 py-2 text-right">
-                <Button
-                  size="xs"
-                  variant="outline"
-                  disabled={isChecking}
-                  onclick={() => imageCache.check(row.ref)}
-                >
-                  {isChecking ? "Checking…" : "Check now"}
-                </Button>
-              </td>
-            </tr>
-          {/each}
-        </tbody>
-      </table>
+    <div class="flex flex-col gap-2">
+      {#each rows as row (row.ref)}
+        {@const entry = imageCache.entries[row.ref]}
+        {@const state = imageCache.isStale(row.ref)}
+        {@const view = badgeFor(state)}
+        {@const isChecking = imageCache.checking.has(row.ref)}
+        {@const latestTag =
+          entry?.highest_semver_tag && entry.highest_semver_tag !== row.tag
+            ? entry.highest_semver_tag
+            : null}
+        <div
+          class="flex flex-col gap-1.5 rounded-md border border-border bg-muted/10 px-3 py-2.5"
+        >
+          <!-- Row 1: service name + full image:tag -->
+          <div class="flex items-baseline justify-between gap-2">
+            <span class="text-xs font-semibold">{row.service}</span>
+            <span class="font-mono text-xs text-muted-foreground truncate" title={row.ref}>
+              {row.image}:{row.tag}
+            </span>
+          </div>
+
+          <!-- Row 2: current digest → latest digest / latest tag -->
+          <div class="flex items-center justify-between gap-2 text-[0.7rem] font-mono text-muted-foreground">
+            <span title={entry?.digest ?? "not checked"}>
+              current: {shortDigest(entry?.digest)}
+            </span>
+            <span title={entry?.latest_digest ?? "not checked"}>
+              latest: {shortDigest(entry?.latest_digest)}
+              {#if latestTag}
+                <span class="text-amber-400"> ({latestTag})</span>
+              {/if}
+            </span>
+          </div>
+
+          <!-- Row 3: state badge + check-now -->
+          <div class="flex items-center justify-between gap-2">
+            <Badge variant="default" class={view.class}>{view.label}</Badge>
+            <Button
+              size="xs"
+              variant="outline"
+              disabled={isChecking}
+              onclick={() => imageCache.check(row.ref)}
+            >
+              {isChecking ? "Checking…" : "Check now"}
+            </Button>
+          </div>
+        </div>
+      {/each}
     </div>
   </div>
 {/if}

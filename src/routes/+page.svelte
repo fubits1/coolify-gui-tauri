@@ -246,7 +246,9 @@
 			</div>
 
 			{#if resources.selectedResource}
-				<aside class="relative w-96 shrink-0 overflow-auto border-l border-border">
+				<aside
+					class="relative w-1/2 min-w-[24rem] shrink-0 overflow-auto border-l border-border"
+				>
 					<button
 						type="button"
 						class="absolute right-2 top-2 z-10 inline-flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground"

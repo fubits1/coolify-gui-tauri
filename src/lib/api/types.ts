@@ -55,15 +55,34 @@ export interface Healthcheck {
   retries?: number;
 }
 
+export interface ServiceContainer {
+  uuid: string;
+  name: string;
+  image?: string;
+  fqdn?: string;
+}
+
 export interface ResourceDetail extends Resource {
   git_repository?: string;
   git_branch?: string;
   git_commit_sha?: string;
   ports_exposes?: string;
   docker_compose_raw?: string;
+  /** Build-pack-specific config — populated for nixpacks/railpack/dockerfile Applications. */
+  install_command?: string;
+  build_command?: string;
+  start_command?: string;
+  base_directory?: string;
+  publish_directory?: string;
+  dockerfile?: string;
+  dockerfile_location?: string;
+  dockerfile_target_build?: string;
+  watch_paths?: string;
   env_vars: EnvVar[];
   healthcheck?: Healthcheck;
   server_name?: string;
+  /** Empty for Application + Database; populated for compose Services. */
+  service_containers: ServiceContainer[];
 }
 
 export interface TestConnectionResult {

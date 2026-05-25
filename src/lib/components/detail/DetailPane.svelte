@@ -29,11 +29,12 @@ Props:
 		TabsContent,
 	} from "$lib/components/ui/tabs";
 	import StatusBadge from "$lib/components/badges/StatusBadge.svelte";
+	import { instance } from "$lib/stores/instance.svelte";
 	import { toast } from "$lib/util/toast";
 	import DeployDialog from "./DeployDialog.svelte";
 	import OverviewTab from "./tabs/OverviewTab.svelte";
 	import EnvTab from "./tabs/EnvTab.svelte";
-	import ComposeTab from "./tabs/ComposeTab.svelte";
+	import BuildTab from "./tabs/BuildTab.svelte";
 	import LogsTab from "./tabs/LogsTab.svelte";
 	import ImagesTab from "./tabs/ImagesTab.svelte";
 
@@ -114,9 +115,18 @@ Props:
 		activeTab = "overview";
 	});
 
-	const showComposeTab = $derived(
+	const showBuildTab = $derived(
 		resource != null && resource.kind !== "Database",
 	);
+	// Tab label reflects the actual build pack so users don't see "Compose"
+	// on a nixpacks app or vice-versa.
+	const buildTabLabel = $derived.by(() => {
+		const bp = (detail?.build_pack ?? resource?.build_pack ?? "").toLowerCase();
+		if (bp === "dockercompose" || resource?.kind === "Service") return "Compose";
+		if (bp === "dockerfile") return "Dockerfile";
+		if (bp === "nixpacks" || bp === "railpack" || bp === "static") return "Build";
+		return "Build";
+	});
 	// Images tab needs *something* to inspect — either a direct image_ref or
 	// a compose file we can parse refs out of. If neither, hide the tab.
 	const showImagesTab = $derived(
@@ -126,6 +136,11 @@ Props:
 	);
 
 	const envCount = $derived(envs.length);
+	// Use `!important` variants + dark-mode equivalents to override the
+	// base TabsTrigger classes (which set dark:text-muted-foreground at
+	// higher specificity in the cascade).
+	const activeTabClass =
+		"bg-background shadow-sm font-semibold !text-amber-400 dark:!text-amber-400";
 	const breadcrumb = $derived.by(() => {
 		if (!resource) return "";
 		const parts: string[] = [];
@@ -223,16 +238,39 @@ Props:
 		<!-- Tabs -->
 		<Tabs bind:value={activeTab} class="flex-1 min-h-0">
 			<TabsList>
-				<TabsTrigger value="overview">Overview</TabsTrigger>
-				<TabsTrigger value="env">
+				<TabsTrigger
+					value="overview"
+					class={activeTab === "overview" ? activeTabClass : ""}
+				>
+					Overview
+				</TabsTrigger>
+				<TabsTrigger
+					value="env"
+					class={activeTab === "env" ? activeTabClass : ""}
+				>
 					Env{envCount > 0 ? ` (${envCount})` : ""}
 				</TabsTrigger>
-				{#if showComposeTab}
-					<TabsTrigger value="compose">Compose</TabsTrigger>
+				{#if showBuildTab}
+					<TabsTrigger
+						value="compose"
+						class={activeTab === "compose" ? activeTabClass : ""}
+					>
+						{buildTabLabel}
+					</TabsTrigger>
 				{/if}
-				<TabsTrigger value="logs">Logs</TabsTrigger>
+				<TabsTrigger
+					value="logs"
+					class={activeTab === "logs" ? activeTabClass : ""}
+				>
+					Logs
+				</TabsTrigger>
 				{#if showImagesTab}
-					<TabsTrigger value="images">Images</TabsTrigger>
+					<TabsTrigger
+						value="images"
+						class={activeTab === "images" ? activeTabClass : ""}
+					>
+						Images
+					</TabsTrigger>
 				{/if}
 			</TabsList>
 
@@ -250,10 +288,10 @@ Props:
 				<EnvTab env={envs} />
 			</TabsContent>
 
-			{#if showComposeTab}
+			{#if showBuildTab}
 				<TabsContent value="compose" class="overflow-auto">
 					{#if detail}
-						<ComposeTab yaml={detail.docker_compose_raw ?? null} />
+						<BuildTab {detail} />
 					{:else if detailLoading}
 						<div class="text-sm text-muted-foreground">Loading…</div>
 					{/if}
@@ -265,6 +303,10 @@ Props:
 					uuid={resource.uuid}
 					kind={resource.kind}
 					active={activeTab === "logs"}
+					containers={detail?.service_containers ?? []}
+					instanceUrl={instance.url}
+					projectUuid={resource.project_uuid ?? null}
+					environmentName={resource.environment_name ?? null}
 				/>
 			</TabsContent>
 

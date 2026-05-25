@@ -33,8 +33,8 @@ export const api = {
     invoke<void>("stop_resource", { uuid, kind }),
   deploy: (uuid: string, force: boolean) =>
     invoke<void>("deploy_resource", { uuid, force }),
-  tailLogs: (uuid: string, kind: string, lines = 500) =>
-    invoke<string>("tail_logs", { uuid, kind, lines }),
+  tailLogs: (uuid: string, kind: string, lines = 500, container?: string) =>
+    invoke<string>("tail_logs", { uuid, kind, lines, container }),
   debugDumpEndpoints: () =>
     invoke<Record<string, string>>("debug_dump_endpoints"),
 };

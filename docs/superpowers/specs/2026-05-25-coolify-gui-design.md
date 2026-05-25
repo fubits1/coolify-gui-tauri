@@ -19,9 +19,19 @@ Companion documents:
 
 This spec supersedes the PRD where they differ.
 
+## Required token scope
+
+Coolify token must have **`read:sensitive` + `deploy`**.
+
+- `read:sensitive` — list/detail incl Env tab values (without it env values are redacted).
+- `deploy` — Restart / Stop / Deploy actions.
+- `write` and `root` NOT required (we don't create/edit resources in v1).
+
+Onboarding screen displays this guidance next to the token input.
+
 ## Goals (v1, full scope per user)
 
-1. Onboarding: paste Coolify URL + Bearer token, "Test connection" against `/health` + `/teams`, store token in OS keyring.
+1. Onboarding: paste Coolify URL + Bearer token (scope: `read:sensitive` + `deploy`), "Test connection" against `/health` + `/teams`, store token in OS keyring.
 2. Overview screen: all Resources across Projects/Environments, two togglable view modes (table + cards), sortable A–Z + by last-deployment, groupable by Project.
 3. Live-ish status per Resource via 5s polling while window focused.
 4. Per-row actions: **Restart** (no confirm), **Deploy** (confirm dialog with `force_rebuild` checkbox).
@@ -54,7 +64,7 @@ This spec supersedes the PRD where they differ.
 | 8 | Overview: two view modes (dense table + cards), togglable | User wants both |
 | 9 | Dark theme only | shadcn-svelte dark default; ops convention |
 | 10 | Connection-status strip + `svelte-sonner` toasts | Persistent state + per-action feedback |
-| 11 | Actions: **Restart** → `/restart`; **Deploy** → `/deploy?uuid=&force=` | Verified against Coolify OpenAPI |
+| 11 | Actions: **Restart** → `/restart`; **Stop** → `/stop`; **Deploy** → `/deploy?uuid=&force=` | Verified against Coolify OpenAPI |
 | 12 | Token storage: `tauri-plugin-keyring` (OS-native) | Encrypted at rest, cross-OS |
 | 13 | HTTP from Rust side via `tauri-plugin-http` (reqwest) | Bypass CORS, hide token from webview |
 | 14 | Registry digest fetch via `oci-distribution` crate | Maintained, OCI-compliant, supports Docker Hub / GHCR / quay |
@@ -99,8 +109,7 @@ src/                       Svelte 5 + TS + Vite
     util/
       semver.ts             tag comparison
       compose.ts            parse docker-compose YAML for image refs
-  routes/                  svelte-spa-router (overview is /, settings is /settings)
-  App.svelte
+  routes/                  SvelteKit filesystem routes (+page.svelte = overview, settings/+page.svelte)
   app.css                  shadcn theme tokens
 
 src-tauri/
@@ -224,7 +233,7 @@ Translates 1:1 into dex tasks. Each item is one ticket.
 1. Scaffold: `pnpm create tauri-app` → Svelte + TS, add `pnpm` lockfile, commit.
 2. Add Tauri plugins: `http`, `store`, `keyring`. Wire capabilities.
 3. Add shadcn-svelte, init theme, dark mode lock.
-4. Add `svelte-spa-router`, two routes: `/` and `/settings`.
+4. SvelteKit filesystem routes: `+page.svelte` (overview) and `settings/+page.svelte`.
 5. Onboarding screen + Rust `test_connection` + token storage.
 6. Generate TS types from Coolify OpenAPI (`openapi-typescript`).
 7. Rust `coolify::client` (reqwest + bearer injection + base URL).
@@ -264,6 +273,12 @@ End-to-end on a real Coolify instance (user's sandbox):
 6. Click "Check all images" → at least one resource shows a freshness badge within 30s.
 7. Kill network (turn off wifi) → connection strip flips red within 6s; restore → green within 5s.
 8. `pnpm tauri build` produces signed `.dmg` (mac) without errors.
+
+## Implementation notes
+
+**Routing:** SvelteKit static adapter (not `svelte-spa-router`). The Tauri 2 svelte-ts template ships SvelteKit by default; embracing it gives us filesystem routing, layouts, and load functions without bolt-ons. Overview = `src/routes/+page.svelte`, Settings = `src/routes/settings/+page.svelte`.
+
+**Tauri MCP:** `Michael-Obele/tauri-docs` (Mastra MCP wrapper around tauri.app llms.txt) configured in `.mcp.json` via `mcp-remote` for tauri.app docs access. Local fallback at `docs/external/tauri-llms.txt`.
 
 ## Open Items (to confirm during implementation, not blockers)
 

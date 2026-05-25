@@ -59,10 +59,10 @@ src/                  Svelte 5 frontend (runes)
     components/       shadcn-svelte primitives + app components
     stores/           $state-based reactive stores
     types/            OpenAPI-generated TS types
-  routes/             svelte-spa-router pages
-    +overview.svelte
-    +resource/[uuid].svelte
-    +settings.svelte
+  routes/             SvelteKit filesystem routes
+    +page.svelte              (overview)
+    resource/[uuid]/+page.svelte
+    settings/+page.svelte
 
 src-tauri/
   src/

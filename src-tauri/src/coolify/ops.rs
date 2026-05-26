@@ -1,12 +1,15 @@
 use serde::Serialize;
 use tauri::State;
 
+use std::collections::HashMap;
+use std::time::Instant;
+
 use super::client::CoolifyClient;
 use super::types::{
     parse_status, EnvVar, HealthCheck, RawApplication, RawDatabase, RawEnvVar, RawService,
     Resource, ResourceDetail, ResourceKind,
 };
-use super::AppState;
+use super::{AppState, ProjectEnvCache, ProjectEnvLookup};
 
 /// Result of an onboarding "Test connection" probe.
 ///
@@ -158,7 +161,13 @@ pub async fn list_resources(
             let uuids: Vec<String> = resources.iter().map(|r| r.uuid.clone()).collect();
             let deploys = fetch_last_deployments(&client, &state, &uuids).await;
             for mut r in resources {
-                r.last_deployed_at = deploys.get(&r.uuid).cloned().flatten();
+                // Only OVERRIDE the updated_at fallback when the deploys
+                // lookup actually returned a timestamp. A None means
+                // either no deploy history yet OR a transient 429 — in
+                // both cases the updated_at value is better than "—".
+                if let Some(Some(ts)) = deploys.get(&r.uuid).cloned() {
+                    r.last_deployed_at = Some(ts);
+                }
                 out.push(r);
             }
         }
@@ -170,7 +179,25 @@ pub async fn list_resources(
     match svcs {
         Ok(list) => {
             tracing::debug!("list_resources: /services -> {} items", list.len());
-            out.extend(list.into_iter().map(RawService::into_resource));
+            let resources: Vec<Resource> = list.into_iter().map(RawService::into_resource).collect();
+            // For services whose FQDN we couldn't scrape from the compose YAML
+            // (Coolify nocodb-style templates only declare SERVICE_URL_* as
+            // env passthroughs), fall back to the per-service envs endpoint
+            // and look for a URL there.
+            let needing_fqdn: Vec<String> = resources
+                .iter()
+                .filter(|r| r.fqdn.is_none() || r.fqdn.as_deref().map(|s| s.is_empty()).unwrap_or(true))
+                .map(|r| r.uuid.clone())
+                .collect();
+            let resolved = fetch_service_fqdns(&client, &state, &needing_fqdn).await;
+            for mut r in resources {
+                if r.fqdn.as_deref().map(|s| s.is_empty()).unwrap_or(true) {
+                    if let Some(Some(url)) = resolved.get(&r.uuid).cloned() {
+                        r.fqdn = Some(url);
+                    }
+                }
+                out.push(r);
+            }
         }
         Err(e) => {
             tracing::warn!("list_resources: /services failed: {}", e);
@@ -188,6 +215,12 @@ pub async fn list_resources(
         }
     }
 
+    // Enrich resources with project_uuid + environment_uuid via the
+    // /projects → /projects/{uuid} fan-out. Coolify's list responses for
+    // Services + Databases ship only `environment_id` (int) without the
+    // nested env+project UUIDs the dashboard deep-link URL needs.
+    enrich_project_env(&client, &state, &mut out).await;
+
     if out.is_empty() && !errors.is_empty() {
         let combined = errors
             .iter()
@@ -200,6 +233,121 @@ pub async fn list_resources(
         resources: out,
         errors,
     })
+}
+
+/// Build (and cache, 5 min) a `environment_id → (project_uuid, env_uuid, …)`
+/// map by fanning out `/projects` then `/projects/{uuid}` per project.
+///
+/// Used to fill `project_uuid` + `environment_uuid` on Resources whose
+/// list response stripped the nested `environment.project` object (common
+/// for Services + Databases). Cached aggressively because projects +
+/// environments rarely change.
+async fn build_project_env_cache(client: &CoolifyClient) -> Option<ProjectEnvCache> {
+    let projects: Vec<serde_json::Value> = match client.get("api/v1/projects").await {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!("project_env_cache: /projects failed: {}", e);
+            return None;
+        }
+    };
+    let mut by_env_id: HashMap<i64, ProjectEnvLookup> = HashMap::new();
+    for proj in projects {
+        let proj_uuid = match proj.get("uuid").and_then(|v| v.as_str()) {
+            Some(s) => s.to_string(),
+            None => continue,
+        };
+        let proj_name = proj
+            .get("name")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let path = format!("api/v1/projects/{}", proj_uuid);
+        let detail: serde_json::Value = match client.get(&path).await {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!("project_env_cache: {} failed: {}", path, e);
+                continue;
+            }
+        };
+        let envs = match detail.get("environments").and_then(|v| v.as_array()) {
+            Some(a) => a,
+            None => continue,
+        };
+        for env in envs {
+            let env_id = match env.get("id").and_then(|v| v.as_i64()) {
+                Some(n) => n,
+                None => continue,
+            };
+            let env_uuid = match env.get("uuid").and_then(|v| v.as_str()) {
+                Some(s) => s.to_string(),
+                None => continue,
+            };
+            let env_name = env
+                .get("name")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            by_env_id.insert(
+                env_id,
+                ProjectEnvLookup {
+                    project_uuid: proj_uuid.clone(),
+                    project_name: proj_name.clone(),
+                    environment_uuid: env_uuid,
+                    environment_name: env_name,
+                },
+            );
+        }
+    }
+    Some(ProjectEnvCache {
+        by_env_id,
+        fetched_at: Instant::now(),
+    })
+}
+
+/// Fill `project_uuid` + `environment_uuid` on each Resource whose
+/// list-response shape only carried `environment_id`. Cache TTL 5 min.
+async fn enrich_project_env(client: &CoolifyClient, state: &State<'_, AppState>, out: &mut [Resource]) {
+    const TTL_SECS: u64 = 300;
+    let cached: Option<ProjectEnvCache> = {
+        let guard = state.project_env_cache.read().await;
+        guard.as_ref().and_then(|c| {
+            if c.fetched_at.elapsed().as_secs() < TTL_SECS {
+                Some(c.clone())
+            } else {
+                None
+            }
+        })
+    };
+    let cache = match cached {
+        Some(c) => c,
+        None => match build_project_env_cache(client).await {
+            Some(c) => {
+                *state.project_env_cache.write().await = Some(c.clone());
+                c
+            }
+            None => return,
+        },
+    };
+    for r in out.iter_mut() {
+        let env_id = match r.environment_id {
+            Some(id) => id,
+            None => continue,
+        };
+        let lookup = match cache.by_env_id.get(&env_id) {
+            Some(l) => l,
+            None => continue,
+        };
+        if r.project_uuid.is_none() {
+            r.project_uuid = Some(lookup.project_uuid.clone());
+        }
+        if r.project_name.is_none() {
+            r.project_name = lookup.project_name.clone();
+        }
+        if r.environment_uuid.is_none() {
+            r.environment_uuid = Some(lookup.environment_uuid.clone());
+        }
+        if r.environment_name.is_none() {
+            r.environment_name = lookup.environment_name.clone();
+        }
+    }
 }
 
 /// Fetch one Resource by `{kind, uuid}` and expand its detail fields.
@@ -217,7 +365,37 @@ pub async fn get_resource_detail(
     let client = clone_client(&state).await?;
     let path = format!("api/v1/{}/{}", resource_kind.path_segment(), uuid);
     let raw: serde_json::Value = client.get(&path).await.map_err(|e| e.to_string())?;
-    Ok(build_detail(raw, resource_kind))
+    let mut detail = build_detail(raw, resource_kind);
+    // For Applications, the per-resource detail payload's `last_online_at`
+    // is a continuous heartbeat (refreshed by Coolify's status reconciler)
+    // — it shows "few seconds ago" for any running app regardless of when
+    // the user last deployed. Override with the most recent FINISHED
+    // record from /deployments. For Services + Databases this Coolify
+    // version's `last_online_at` happens to track only deploy events, so
+    // build_detail's heuristic is left alone for those kinds.
+    if matches!(resource_kind, ResourceKind::Application) {
+        let dpath = format!("api/v1/deployments/applications/{}?take=3", uuid);
+        match client.get::<serde_json::Value>(&dpath).await {
+            Ok(v) => {
+                detail.last_deployed_at = extract_last_finished_deployment_timestamp(&v);
+            }
+            Err(e) => {
+                tracing::warn!("detail last_deploy fetch failed for {}: {}", uuid, e);
+                detail.last_deployed_at = None;
+            }
+        }
+        // Write back into the shared deploy_cache so list_resources's
+        // next poll surfaces the SAME timestamp the user just saw.
+        let mut cache = state.deploy_cache.write().await;
+        cache.insert(
+            uuid.clone(),
+            super::DeployCacheEntry {
+                last_deployed_at: detail.last_deployed_at,
+                fetched_at: Instant::now(),
+            },
+        );
+    }
+    Ok(detail)
 }
 
 /// Fetch env vars for a resource. Separate command so the detail pane can
@@ -252,8 +430,6 @@ pub async fn get_resource_envs(
 /// `key` straight through and prefer `real_value` (full token) over
 /// `value` (masked) since the UI handles its own masking.
 fn parse_envs(v: &serde_json::Value) -> Vec<EnvVar> {
-    // Accept bare array (documented), `{ data: [...] }` wrapper (Coolify
-    // sometimes paginates), or `{ envs: [...] }` (legacy / variant).
     let arr = v
         .as_array()
         .or_else(|| v.get("data").and_then(|d| d.as_array()))
@@ -262,6 +438,11 @@ fn parse_envs(v: &serde_json::Value) -> Vec<EnvVar> {
     let arr = match arr {
         Some(a) => a,
         None => return Vec::new(),
+    };
+    let bool_or = |item: &serde_json::Value, key: &str, default: bool| -> bool {
+        item.get(key)
+            .and_then(|x| x.as_bool())
+            .unwrap_or(default)
     };
     arr.iter()
         .filter_map(|item| {
@@ -272,15 +453,20 @@ fn parse_envs(v: &serde_json::Value) -> Vec<EnvVar> {
                 .or_else(|| item.get("value").and_then(|x| x.as_str()))
                 .unwrap_or("")
                 .to_string();
-            let is_secret = item
-                .get("is_shown_once")
-                .and_then(|x| x.as_bool())
-                .or_else(|| item.get("is_preview").and_then(|x| x.as_bool()))
-                .unwrap_or(true);
+            let is_secret = bool_or(item, "is_shown_once", true);
+            let is_preview = bool_or(item, "is_preview", false);
+            let is_buildtime = bool_or(item, "is_buildtime", false);
+            // Coolify defaults runtime=true unless explicitly false.
+            let is_runtime = bool_or(item, "is_runtime", true);
+            let is_shared = bool_or(item, "is_shared", false);
             Some(EnvVar {
                 key,
                 value,
                 is_secret,
+                is_preview,
+                is_buildtime,
+                is_runtime,
+                is_shared,
             })
         })
         .collect()
@@ -330,6 +516,12 @@ pub async fn deploy_resource(
     let client = clone_client(&state).await?;
     let path = format!("api/v1/deploy?uuid={}&force={}", uuid, force);
     client.get_raw(&path).await.map_err(|e| e.to_string())?;
+    // Invalidate the per-app deploy_cache entry so the next list refresh
+    // sees the new finished record once it lands, instead of returning the
+    // 5-min cached value (which would show the OLD deploy time long after
+    // the user redeployed and would diverge from the detail tab's live
+    // /deployments fetch).
+    state.deploy_cache.write().await.remove(&uuid);
     Ok(())
 }
 
@@ -375,15 +567,42 @@ pub async fn tail_logs(
     uuid: String,
     kind: String,
     lines: u32,
+    container: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<String, String> {
-    let segment = action_segment(&kind)?;
     let capped = lines.min(5000);
     let client = clone_client(&state).await?;
-    let path = format!("api/v1/{}/{}/logs?lines={}", segment, uuid, capped);
-    // Coolify returns JSON `{"logs": "<text>"}`, not plain text. Decode
-    // accordingly; if the call 404s (services without log support) bubble
-    // a friendly message instead of the raw error.
+
+    // The Coolify v1 API only exposes a logs endpoint under
+    // /applications/{uuid}/logs. Services + Databases have NO documented
+    // logs endpoint. The dashboard streams container logs out-of-band
+    // (likely SSH/docker-exec through the Soketi WebSocket). For now,
+    // surface this gap explicitly rather than 404-chasing.
+    let resource_kind = ResourceKind::from_str(&kind)
+        .ok_or_else(|| format!("unknown resource kind: {}", kind))?;
+    let path = match resource_kind {
+        ResourceKind::Application => {
+            // Coolify v1 only documents `lines`. Adding `&timestamps=true`
+            // causes network errors against `cf.fubits.dev` (verified via
+            // tracing logs) — likely a routing/CSRF mismatch. Drop it; the
+            // frontend `humanizeTimestamps` still normalizes any RFC 3339
+            // prefixes the container itself ships.
+            format!("api/v1/applications/{}/logs?lines={}", uuid, capped)
+        }
+        ResourceKind::Service | ResourceKind::Database => {
+            let _ = container; // ignored — see above
+            return Err(format!(
+                "The Coolify v1 API does not expose a logs endpoint for {} resources. \
+                 Use the Coolify dashboard for now.",
+                if matches!(resource_kind, ResourceKind::Service) {
+                    "service"
+                } else {
+                    "database"
+                }
+            ));
+        }
+    };
+
     let raw: Result<serde_json::Value, _> = client.get(&path).await;
     match raw {
         Ok(v) => Ok(v
@@ -392,7 +611,7 @@ pub async fn tail_logs(
             .map(|s| s.to_string())
             .unwrap_or_default()),
         Err(crate::coolify::client::CoolifyError::NotFound) => {
-            Err("Logs are not available for this resource type via the Coolify API".to_string())
+            Err(format!("404 at {}", path))
         }
         Err(e) => Err(e.to_string()),
     }
@@ -421,7 +640,9 @@ async fn fetch_last_deployments(
 ) -> std::collections::HashMap<String, Option<chrono::DateTime<chrono::Utc>>> {
     use std::time::{Duration, Instant};
 
-    const TTL: Duration = Duration::from_secs(60);
+    // 5min cache — Coolify behind Cloudflare 429s aggressively when we hit
+    // /deployments/applications/{uuid} per resource on every list refresh.
+    const TTL: Duration = Duration::from_secs(300);
     let now = Instant::now();
 
     // Phase 1: drain anything still fresh from the cache.
@@ -452,10 +673,10 @@ async fn fetch_last_deployments(
         let client = client.clone();
         let uuid = uuid.clone();
         futs.push(async move {
-            let path = format!("api/v1/deployments/applications/{}?take=1", uuid);
+            let path = format!("api/v1/deployments/applications/{}?take=3", uuid);
             let res: Result<serde_json::Value, _> = client.get(&path).await;
             let ts = match res {
-                Ok(v) => extract_first_deployment_timestamp(&v),
+                Ok(v) => extract_last_finished_deployment_timestamp(&v),
                 Err(e) => {
                     tracing::warn!("last_deploy fetch failed for {}: {}", uuid, e);
                     None
@@ -482,20 +703,160 @@ async fn fetch_last_deployments(
     out
 }
 
-/// `/deployments/applications/{uuid}?take=1` returns either an array or an
-/// object with a `data` key; both shapes have at most one deployment record
-/// when `take=1`. Extract `created_at` and parse with the same loose
-/// datetime parser used elsewhere (RFC 3339 or MySQL `YYYY-MM-DD HH:MM:SS`).
-fn extract_first_deployment_timestamp(
+/// Scan a `/deployments/applications/{uuid}` response and return the
+/// `created_at` of the most recent deployment whose `status` is
+/// `"finished"`. Skips `queued`, `in_progress`, `failed`, and
+/// `cancelled-by-user` records — none of those reflect "the version
+/// currently running". Returns None when no finished record is in the
+/// window (e.g. app never successfully deployed, or all returned records
+/// are queued/in-progress).
+///
+/// Accepts either a bare JSON array OR `{data: [...]}` wrapper shape.
+/// Records are assumed to be returned newest-first (Coolify's default
+/// ordering); we still walk linearly to be defensive.
+fn extract_last_finished_deployment_timestamp(
     v: &serde_json::Value,
 ) -> Option<chrono::DateTime<chrono::Utc>> {
-    let first = v
+    // Coolify v1 ships /deployments/applications/{uuid} as
+    // `{"deployments": [...]}`. Older / future versions may use `data` or
+    // a bare array — accept all three so we're robust to schema drift.
+    let arr = v
         .as_array()
-        .and_then(|a| a.first())
-        .or_else(|| v.get("data").and_then(|d| d.as_array()).and_then(|a| a.first()))
-        .or_else(|| if v.is_object() { Some(v) } else { None })?;
-    let raw = first.get("created_at").and_then(|x| x.as_str())?;
-    parse_loose_datetime(raw)
+        .or_else(|| v.get("deployments").and_then(|d| d.as_array()))
+        .or_else(|| v.get("data").and_then(|d| d.as_array()))?;
+    for item in arr {
+        let status = item.get("status").and_then(|x| x.as_str()).unwrap_or("");
+        if status != "finished" {
+            continue;
+        }
+        if let Some(ts) = item
+            .get("created_at")
+            .and_then(|x| x.as_str())
+            .and_then(parse_loose_datetime)
+        {
+            return Some(ts);
+        }
+    }
+    None
+}
+
+/// Look up `SERVICE_URL_*` / `SERVICE_FQDN_*` env-var VALUES for each
+/// service uuid (via `/services/{uuid}/envs`), cached for 60s. Returns
+/// `uuid -> Some(url)` when a URL-looking value is found, else `None`.
+async fn fetch_service_fqdns(
+    client: &CoolifyClient,
+    state: &State<'_, AppState>,
+    uuids: &[String],
+) -> std::collections::HashMap<String, Option<String>> {
+    use std::time::{Duration, Instant};
+    const TTL: Duration = Duration::from_secs(60);
+    let now = Instant::now();
+
+    let mut out: std::collections::HashMap<String, Option<String>> =
+        std::collections::HashMap::new();
+    let mut to_fetch: Vec<String> = Vec::new();
+    {
+        let cache = state.service_fqdn_cache.read().await;
+        for uuid in uuids {
+            match cache.get(uuid) {
+                Some(entry) if now.duration_since(entry.fetched_at) < TTL => {
+                    out.insert(uuid.clone(), entry.fqdn.clone());
+                }
+                _ => to_fetch.push(uuid.clone()),
+            }
+        }
+    }
+
+    if to_fetch.is_empty() {
+        return out;
+    }
+
+    let mut futs = Vec::with_capacity(to_fetch.len());
+    for uuid in &to_fetch {
+        let client = client.clone();
+        let uuid = uuid.clone();
+        futs.push(async move {
+            let path = format!("api/v1/services/{}/envs", uuid);
+            let res: Result<serde_json::Value, _> = client.get(&path).await;
+            let fqdn = match res {
+                Ok(v) => extract_service_url_from_envs(&v),
+                Err(_) => None,
+            };
+            (uuid, fqdn)
+        });
+    }
+    let results = futures::future::join_all(futs).await;
+
+    let mut cache = state.service_fqdn_cache.write().await;
+    let fetched_at = Instant::now();
+    for (uuid, fqdn) in results {
+        cache.insert(
+            uuid.clone(),
+            super::ServiceFqdnEntry {
+                fqdn: fqdn.clone(),
+                fetched_at,
+            },
+        );
+        out.insert(uuid, fqdn);
+    }
+    out
+}
+
+/// Walk an `/envs` response (bare array of env-var objects) and pull the
+/// first value that LOOKS like a URL out of a `SERVICE_URL_*` or
+/// `SERVICE_FQDN_*` key. Loopback hosts are filtered out — those are
+/// health-check internal URLs, not the user-facing FQDN.
+fn extract_service_url_from_envs(v: &serde_json::Value) -> Option<String> {
+    let arr = v
+        .as_array()
+        .or_else(|| v.get("data").and_then(|d| d.as_array()))?;
+    let mut prod_url: Option<String> = None;
+    let mut any_url: Option<String> = None;
+    for item in arr {
+        let key = match item.get("key").and_then(|x| x.as_str()) {
+            Some(k) => k,
+            None => continue,
+        };
+        let upper = key.to_ascii_uppercase();
+        if !upper.starts_with("SERVICE_URL_") && !upper.starts_with("SERVICE_FQDN_") {
+            continue;
+        }
+        let value = item
+            .get("real_value")
+            .and_then(|x| x.as_str())
+            .or_else(|| item.get("value").and_then(|x| x.as_str()))
+            .unwrap_or("")
+            .trim();
+        if value.is_empty() {
+            continue;
+        }
+        // Coerce bare hostnames into https:// URLs.
+        let url = if value.starts_with("http://") || value.starts_with("https://") {
+            value.to_string()
+        } else {
+            format!("https://{}", value)
+        };
+        // Skip loopback.
+        let lower = url.to_ascii_lowercase();
+        if lower.contains("://localhost")
+            || lower.contains("://127.0.0.1")
+            || lower.contains("://0.0.0.0")
+        {
+            continue;
+        }
+        // Prefer production scope (is_preview=false) over preview duplicates.
+        let is_preview = item
+            .get("is_preview")
+            .and_then(|x| x.as_bool())
+            .unwrap_or(false);
+        if !is_preview && prod_url.is_none() {
+            prod_url = Some(url.clone());
+        }
+        if any_url.is_none() {
+            any_url = Some(url);
+        }
+    }
+    prod_url.or(any_url)
 }
 
 fn parse_loose_datetime(s: &str) -> Option<chrono::DateTime<chrono::Utc>> {
@@ -594,6 +955,11 @@ fn build_detail(raw: serde_json::Value, kind: ResourceKind) -> ResourceDetail {
         .and_then(|e| e.get("name"))
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
+    let environment_uuid = env_obj
+        .and_then(|e| e.get("uuid"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let environment_id = raw.get("environment_id").and_then(|v| v.as_i64());
     let project_uuid = env_obj
         .and_then(|e| e.get("project"))
         .and_then(|p| p.get("uuid"))
@@ -627,13 +993,57 @@ fn build_detail(raw: serde_json::Value, kind: ResourceKind) -> ResourceDetail {
         .get("health_check")
         .and_then(|v| serde_json::from_value::<HealthCheck>(v.clone()).ok());
 
+    // Service containers: Coolify's GET /services/{uuid} response nests
+    // each compose service under `applications` (HTTP services) and
+    // `databases` (stateful services). Each item carries its own coolify
+    // uuid — that's the value the per-container logs endpoint
+    // (/applications/{uuid}/logs) expects.
+    let mut service_containers: Vec<crate::coolify::types::ServiceContainer> = Vec::new();
+    for arr_key in [
+        "applications",
+        "databases",
+        // Legacy variants — kept for older Coolify versions.
+        "service_applications",
+        "service_databases",
+    ] {
+        if let Some(arr) = raw.get(arr_key).and_then(|v| v.as_array()) {
+            for item in arr {
+                let uuid = match item.get("uuid").and_then(|x| x.as_str()) {
+                    Some(s) if !s.is_empty() => s.to_string(),
+                    _ => continue,
+                };
+                let name = item
+                    .get("name")
+                    .and_then(|x| x.as_str())
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| uuid.clone());
+                let image = item
+                    .get("image")
+                    .and_then(|x| x.as_str())
+                    .map(|s| s.to_string());
+                let fqdn = item
+                    .get("fqdn")
+                    .and_then(|x| x.as_str())
+                    .map(|s| s.to_string());
+                service_containers.push(crate::coolify::types::ServiceContainer {
+                    uuid,
+                    name,
+                    image,
+                    fqdn,
+                });
+            }
+        }
+    }
+
     ResourceDetail {
         uuid,
         name,
         kind,
         project_uuid,
         project_name,
+        environment_uuid,
         environment_name,
+        environment_id,
         status,
         fqdn,
         image_ref,
@@ -644,9 +1054,25 @@ fn build_detail(raw: serde_json::Value, kind: ResourceKind) -> ResourceDetail {
         git_commit_sha: get_str(&raw, "git_commit_sha"),
         ports_exposes: get_str(&raw, "ports_exposes"),
         docker_compose_raw: get_str(&raw, "docker_compose_raw"),
+        install_command: get_str(&raw, "install_command"),
+        build_command: get_str(&raw, "build_command"),
+        start_command: get_str(&raw, "start_command"),
+        base_directory: get_str(&raw, "base_directory"),
+        publish_directory: get_str(&raw, "publish_directory"),
+        dockerfile: get_str(&raw, "dockerfile"),
+        dockerfile_location: get_str(&raw, "dockerfile_location"),
+        dockerfile_target_build: get_str(&raw, "dockerfile_target_build"),
+        watch_paths: get_str(&raw, "watch_paths"),
+        pre_deployment_command: get_str(&raw, "pre_deployment_command"),
+        pre_deployment_command_container: get_str(&raw, "pre_deployment_command_container"),
+        post_deployment_command: get_str(&raw, "post_deployment_command"),
+        post_deployment_command_container: get_str(&raw, "post_deployment_command_container"),
+        custom_docker_run_options: get_str(&raw, "custom_docker_run_options"),
+        static_image: get_str(&raw, "static_image"),
         env_vars,
         healthcheck,
         server_name,
+        service_containers,
     }
 }
 

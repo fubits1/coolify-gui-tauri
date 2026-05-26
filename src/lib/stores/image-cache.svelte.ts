@@ -24,8 +24,27 @@ import { toast } from "$lib/util/toast";
 
 const CONCURRENCY = 4;
 
-/** Tri-state result for a single image ref. */
-export type StaleState = "unknown" | "fresh" | "newer-available";
+/**
+ * Verdict result for a single image ref.
+ *
+ * - `unknown` — no signal we can trust (cache empty, no current digest, no
+ *   semver comparator on either side).
+ * - `fresh` — confirmed identical: current digest matches latest digest.
+ * - `newer-digest` — current digest is known and DIFFERS from latest. Strong
+ *   signal: registry has a different image than what we last pulled.
+ * - `newer-tag` — current digest is unknown OR matches, but registry has a
+ *   higher semver-named tag than the ref we're pinned to. Weaker signal
+ *   than `newer-digest` (no proof the running container is older — only
+ *   that a higher pinned version exists upstream).
+ */
+export type StaleState = "unknown" | "fresh" | "newer-digest" | "newer-tag";
+
+/** True for any state indicating registry has something newer than what
+ *  the resource is pinned to. Used by counters/badges that don't need
+ *  to distinguish digest-vs-tag basis. */
+export function isNewerState(s: StaleState): boolean {
+  return s === "newer-digest" || s === "newer-tag";
+}
 
 class ImageCacheStore {
   entries: Record<string, ImageCacheEntry> = $state({});
@@ -93,40 +112,64 @@ class ImageCacheStore {
   }
 
   /**
-   * Tri-state freshness verdict for a single image ref:
-   * - `unknown` — never checked
-   * - `newer-available` — `latest_digest` diverges OR `highest_semver_tag`
-   *   parses higher than the current pinned tag
-   * - `fresh` — checked, no newer image visible
+   * Freshness verdict for a single image ref. See `StaleState` for the
+   * exact meaning of each value (digest vs tag basis distinction).
    *
    * The current tag is parsed out of the image ref the same way `compose.ts`
    * splits images, so callers can pass either a full `name:tag` or a bare
    * `name` (which is treated as `:latest`).
    */
-  isStale(imageRef: string): StaleState {
+  isStale(imageRef: string, lastDeployedAt?: string | null): StaleState {
     const entry = this.entries[imageRef];
     if (!entry) return "unknown";
-    // Legacy cache entry from before the Hub API path landed: neither
-    // upstream reference is populated. Treat as unchecked so the scheduler
-    // re-fetches with the new logic instead of falsely reporting "fresh".
-    if (entry.latest_digest == null && entry.highest_semver_tag == null) {
+    // No useful upstream signal AT ALL → genuinely unknown.
+    if (
+      entry.latest_digest == null &&
+      entry.highest_semver_tag == null &&
+      entry.latest_pushed_at == null
+    ) {
       return "unknown";
+    }
+    // For `:latest` tags, an additional publish-timestamp drift check:
+    // when the registry pushed a newer `:latest` AFTER the resource was
+    // deployed, the running container is stale — even if our
+    // `current_digest` (sourced from the registry, not the running
+    // container) currently matches `latest_digest`. Falls through to the
+    // standard digest/semver compare below when timestamps are missing.
+    const tag = parseTag(imageRef);
+    if (tag === "latest" && entry.latest_pushed_at != null && lastDeployedAt) {
+      const deployMs = Date.parse(lastDeployedAt);
+      if (Number.isFinite(deployMs) && entry.latest_pushed_at > deployMs) {
+        return "newer-digest";
+      }
     }
     return this.#stateFor(entry, imageRef);
   }
 
   /** Shared verdict logic for `isStale` and post-check toasts. */
   #stateFor(entry: ImageCacheEntry, imageRef: string): StaleState {
-    if (entry.latest_digest && entry.latest_digest !== entry.digest) {
-      return "newer-available";
+    const hasCurrent = !!entry.digest && entry.digest.length > 0;
+    // Strongest signal: known current digest differs from latest.
+    if (
+      hasCurrent &&
+      entry.latest_digest &&
+      entry.latest_digest !== entry.digest
+    ) {
+      return "newer-digest";
     }
+    // Weaker signal: pinned semver tag less than registry's highest.
+    // Distinct state so the UI can convey we only know the upstream tag
+    // moved, not that the running container is necessarily stale.
     if (entry.highest_semver_tag) {
       const currentTag = parseTag(imageRef);
       const current = parseSemver(currentTag);
       const highest = parseSemver(entry.highest_semver_tag);
       if (current && highest && compareSemver(highest, current) > 0) {
-        return "newer-available";
+        return "newer-tag";
       }
+    }
+    if (!hasCurrent && !entry.highest_semver_tag) {
+      return "unknown";
     }
     return "fresh";
   }

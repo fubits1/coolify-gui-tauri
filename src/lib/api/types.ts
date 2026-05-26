@@ -17,7 +17,9 @@ export interface Resource {
   kind: ResourceKind;
   project_uuid?: string;
   project_name?: string;
+  environment_uuid?: string;
   environment_name?: string;
+  environment_id?: number;
   status: ResourceStatus;
   fqdn?: string;
   /** Primary image:tag (single-image resources). */
@@ -37,6 +39,15 @@ export interface EnvVar {
   key: string;
   value: string;
   is_secret: boolean;
+  /** Preview-deploy scope. The same key can exist in both production and
+   *  preview with different values. */
+  is_preview: boolean;
+  /** Build-time only (not present at runtime). */
+  is_buildtime: boolean;
+  /** Runtime container env (default). */
+  is_runtime: boolean;
+  /** Team-shared variable, not resource-specific. */
+  is_shared: boolean;
 }
 
 export interface Healthcheck {
@@ -46,15 +57,40 @@ export interface Healthcheck {
   retries?: number;
 }
 
+export interface ServiceContainer {
+  uuid: string;
+  name: string;
+  image?: string;
+  fqdn?: string;
+}
+
 export interface ResourceDetail extends Resource {
   git_repository?: string;
   git_branch?: string;
   git_commit_sha?: string;
   ports_exposes?: string;
   docker_compose_raw?: string;
+  /** Build-pack-specific config — populated for nixpacks/railpack/dockerfile Applications. */
+  install_command?: string;
+  build_command?: string;
+  start_command?: string;
+  base_directory?: string;
+  publish_directory?: string;
+  dockerfile?: string;
+  dockerfile_location?: string;
+  dockerfile_target_build?: string;
+  watch_paths?: string;
+  pre_deployment_command?: string;
+  pre_deployment_command_container?: string;
+  post_deployment_command?: string;
+  post_deployment_command_container?: string;
+  custom_docker_run_options?: string;
+  static_image?: string;
   env_vars: EnvVar[];
   healthcheck?: Healthcheck;
   server_name?: string;
+  /** Empty for Application + Database; populated for compose Services. */
+  service_containers: ServiceContainer[];
 }
 
 export interface TestConnectionResult {

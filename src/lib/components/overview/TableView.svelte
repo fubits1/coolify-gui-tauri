@@ -99,19 +99,25 @@ Props:
 		return list;
 	});
 
-	function imageBadgeFor(refs: string[]): {
+	function imageBadgeFor(
+		refs: string[],
+		lastDeployedAt?: string | null,
+	): {
 		stale: number;
+		unknown: number;
 		total: number;
 		checkedAt: number | null;
 	} {
 		if (!refs || refs.length === 0) {
-			return { stale: 0, total: 0, checkedAt: null };
+			return { stale: 0, unknown: 0, total: 0, checkedAt: null };
 		}
 		let stale = 0;
+		let unknown = 0;
 		let earliest: number | null = null;
 		for (const ref of refs) {
-			const state = imageCache.isStale(ref);
-			if (state === "newer-available") stale += 1;
+			const state = imageCache.isStale(ref, lastDeployedAt);
+			if (state === "newer-digest" || state === "newer-tag") stale += 1;
+			else if (state === "unknown") unknown += 1;
 			const entry = imageCache.entries[ref];
 			if (entry) {
 				earliest =
@@ -120,7 +126,7 @@ Props:
 						: Math.min(earliest, entry.checked_at);
 			}
 		}
-		return { stale, total: refs.length, checkedAt: earliest };
+		return { stale, unknown, total: refs.length, checkedAt: earliest };
 	}
 
 	const grouped = $derived.by<Record<string, Resource[]>>(() => {
@@ -214,7 +220,7 @@ Props:
 				<TableHead>Type</TableHead>
 				<TableHead>Status</TableHead>
 				<TableHead>FQDN</TableHead>
-				<TableHead title="Applications: real last-deployment timestamp from Coolify's /deployments history. Services/Databases: when the container was last online (blank while running, since the heartbeat is meaningless then).">Last deploy</TableHead>
+				<TableHead title="Applications: real last-deployment timestamp from Coolify's /deployments (finished records only). Services/Databases: last_online_at — on this Coolify version it only bumps on deploy, not heartbeat. Blank when no deploy history is available.">Last deploy</TableHead>
 				<TableHead>Images</TableHead>
 				<TableHead class="text-right">Actions</TableHead>
 			</TableRow>
@@ -227,7 +233,7 @@ Props:
 							colspan={7}
 							class="text-xs font-medium uppercase tracking-wide text-muted-foreground"
 						>
-							{key} · {grouped[key].length}
+							{key}
 						</TableCell>
 					</TableRow>
 				{/if}
@@ -258,8 +264,13 @@ Props:
 							{/if}
 						</TableCell>
 						<TableCell>
-							{@const badge = imageBadgeFor(r.image_refs ?? [])}
-							<ImageBadge stale={badge.stale} total={badge.total} checkedAt={badge.checkedAt} />
+							{@const badge = imageBadgeFor(r.image_refs ?? [], r.last_deployed_at)}
+							<ImageBadge
+								stale={badge.stale}
+								unknown={badge.unknown}
+								total={badge.total}
+								checkedAt={badge.checkedAt}
+							/>
 						</TableCell>
 						<TableCell class="text-right">
 							<div class="inline-flex items-center gap-1">

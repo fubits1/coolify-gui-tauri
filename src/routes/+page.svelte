@@ -7,13 +7,13 @@
 	import DeployDialog from "$lib/components/detail/DeployDialog.svelte";
 	import ConnectionStrip from "$lib/components/shell/ConnectionStrip.svelte";
 	import { Button } from "$lib/components/ui/button";
-	import { RefreshCw, Settings, X } from "@lucide/svelte";
+	import { RefreshCw, Settings } from "@lucide/svelte";
 	import { api } from "$lib/api/client";
 	import type { ResourceKind } from "$lib/api/types";
 	import { instance } from "$lib/stores/instance.svelte";
 	import { resources } from "$lib/stores/resources.svelte";
 	import { connection } from "$lib/stores/connection.svelte";
-	import { imageCache } from "$lib/stores/image-cache.svelte";
+	import { imageCache, isNewerState } from "$lib/stores/image-cache.svelte";
 	import { runStartupCheck } from "$lib/util/image-scheduler";
 	import { installShortcuts } from "$lib/util/shortcuts";
 	import { toast } from "$lib/util/toast";
@@ -133,9 +133,18 @@
 		// newer-available ACROSS ALL refs and toast a single summary so we
 		// don't claim "up to date" when some entries are stale.
 		const refs = new Set<string>();
+		// Track each ref's owning resource so :latest drift can use the
+		// resource's last_deployed_at when classifying after the batch.
+		const refDeployTimes = new Map<string, string | null>();
 		for (const r of resources.list) {
 			for (const ref of r.image_refs ?? []) {
-				if (ref && ref.trim().length > 0) refs.add(ref);
+				if (!ref || ref.trim().length === 0) continue;
+				refs.add(ref);
+				// First resource wins — same image deployed twice picks
+				// the earliest deploy timestamp seen (most pessimistic).
+				if (!refDeployTimes.has(ref)) {
+					refDeployTimes.set(ref, r.last_deployed_at ?? null);
+				}
 			}
 		}
 		if (refs.size === 0) {
@@ -145,8 +154,8 @@
 		const all = [...refs];
 		toast.info(`Checking ${all.length} images for updates…`);
 		await imageCache.checkMany(all);
-		const newer = all.filter(
-			(ref) => imageCache.isStale(ref) === "newer-available",
+		const newer = all.filter((ref) =>
+			isNewerState(imageCache.isStale(ref, refDeployTimes.get(ref) ?? null)),
 		).length;
 		if (newer > 0) {
 			toast.warning(
@@ -176,6 +185,7 @@
 				? () => void imageCache.checkMany([selected.image_ref as string])
 				: undefined,
 			onLogs: undefined, // future: switch DetailPane to Logs tab
+			onEscape: selected ? () => resources.select(null) : undefined,
 		});
 		return cleanup;
 	});
@@ -246,17 +256,13 @@
 			</div>
 
 			{#if resources.selectedResource}
-				<aside class="relative w-96 shrink-0 overflow-auto border-l border-border">
-					<button
-						type="button"
-						class="absolute right-2 top-2 z-10 inline-flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground"
-						aria-label="Close detail pane"
-						title="Close"
-						onclick={() => resources.select(null)}
-					>
-						<X class="size-4" />
-					</button>
-					<DetailPane resource={resources.selectedResource} />
+				<aside
+					class="relative w-1/2 min-w-[24rem] shrink-0 overflow-auto border-l border-border"
+				>
+					<DetailPane
+						resource={resources.selectedResource}
+						onClose={() => resources.select(null)}
+					/>
 				</aside>
 			{/if}
 		</div>

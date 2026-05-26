@@ -19,10 +19,26 @@ export interface ShortcutHandlers {
   onDeploy?: () => void;
   onCheckImages?: () => void;
   onLogs?: () => void;
+  /** ESC — clear the current selection. Plain ESC, no modifier. */
+  onEscape?: () => void;
 }
 
 export function installShortcuts(handlers: ShortcutHandlers): () => void {
   function onKey(e: KeyboardEvent) {
+    if (
+      e.key === "Escape" &&
+      !e.metaKey &&
+      !e.ctrlKey &&
+      !e.shiftKey &&
+      !e.altKey
+    ) {
+      const target = e.target as HTMLElement | null;
+      const tag = target?.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || target?.isContentEditable)
+        return;
+      handlers.onEscape?.();
+      return;
+    }
     if (!(e.metaKey || e.ctrlKey) || !e.shiftKey) return;
     const key = e.key.toLowerCase();
     if (key === "r") {

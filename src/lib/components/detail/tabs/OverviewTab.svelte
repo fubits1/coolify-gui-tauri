@@ -12,7 +12,20 @@ Props:
 <script lang="ts">
 	import type { ResourceDetail } from "$lib/api/types";
 
-	let { detail }: { detail: ResourceDetail } = $props();
+	import type { Resource } from "$lib/api/types";
+
+	let {
+		detail,
+		resource,
+	}: {
+		detail: ResourceDetail;
+		/** The summary Resource row from the polling list. Used as the
+		 *  authoritative source for `last_deployed_at` so the Last deploy
+		 *  field in this tab always matches the overview column — both
+		 *  derive from the same value rather than independently-timed
+		 *  fetches of `last_online_at`. */
+		resource: Resource;
+	} = $props();
 
 	function relativeTime(iso: string | undefined): string | null {
 		if (!iso) return null;
@@ -61,7 +74,7 @@ Props:
 	const gitHref = $derived(
 		gitWebUrl(detail.git_repository, detail.git_commit_sha),
 	);
-	const lastDeploy = $derived(relativeTime(detail.last_deployed_at));
+	const lastDeploy = $derived(relativeTime(resource.last_deployed_at));
 	const healthcheck = $derived(detail.healthcheck);
 	const healthcheckStr = $derived.by(() => {
 		const hc = detail.healthcheck;

@@ -109,6 +109,36 @@ pub async fn fetch_tags(
     resp.json::<HubTagsPage>().await.map_err(|e| e.to_string())
 }
 
+/// Fetch a single specific tag by name. Used as a fallback when the
+/// `fetch_tags` page (sorted by last_updated, 100 entries) doesn't
+/// include an old pinned tag — without this, `current_digest` came back
+/// empty for any tag that fell off the first page (e.g. `kong:2.8.1`
+/// when Hub has thousands of newer pushes).
+pub async fn fetch_tag(
+    namespace: &str,
+    repository: &str,
+    tag: &str,
+) -> Result<HubTag, String> {
+    let url = format!(
+        "{}/repositories/{}/{}/tags/{}",
+        HUB_BASE, namespace, repository, tag
+    );
+    let http = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let resp = http
+        .get(&url)
+        .header("Accept", "application/json")
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("hub api {}: {}", url, resp.status()));
+    }
+    resp.json::<HubTag>().await.map_err(|e| e.to_string())
+}
+
 /// Best-effort digest for a tag — prefer the top-level `digest` and fall
 /// back to the first amd64/linux arch entry under `images`. Returns `None`
 /// when no candidate is available (the tag is essentially opaque to us).

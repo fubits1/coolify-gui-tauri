@@ -73,7 +73,13 @@ pub struct Resource {
     pub kind: ResourceKind,
     pub project_uuid: Option<String>,
     pub project_name: Option<String>,
+    pub environment_uuid: Option<String>,
     pub environment_name: Option<String>,
+    /// Coolify's integer environment id. Often the ONLY env signal in
+    /// list responses for Services + Databases (which don't always nest
+    /// `environment.uuid`). `ops::list_resources` uses this to look up
+    /// the matching env_uuid + project_uuid via /projects.
+    pub environment_id: Option<i64>,
     pub status: ResourceStatus,
     pub fqdn: Option<String>,
     /// Primary image reference for single-image Resources (databases, apps
@@ -104,6 +110,14 @@ pub struct EnvVar {
     pub key: String,
     pub value: String,
     pub is_secret: bool,
+    /// Preview-deploy scope. Same key can coexist in production + preview.
+    pub is_preview: bool,
+    /// Build-time only (not present at runtime).
+    pub is_buildtime: bool,
+    /// Runtime container env (default).
+    pub is_runtime: bool,
+    /// Team-shared variable, not resource-specific.
+    pub is_shared: bool,
 }
 
 /// Healthcheck configuration as Coolify reports it.
@@ -134,7 +148,9 @@ pub struct ResourceDetail {
     pub kind: ResourceKind,
     pub project_uuid: Option<String>,
     pub project_name: Option<String>,
+    pub environment_uuid: Option<String>,
     pub environment_name: Option<String>,
+    pub environment_id: Option<i64>,
     pub status: ResourceStatus,
     pub fqdn: Option<String>,
     pub image_ref: Option<String>,
@@ -145,9 +161,29 @@ pub struct ResourceDetail {
     pub git_commit_sha: Option<String>,
     pub ports_exposes: Option<String>,
     pub docker_compose_raw: Option<String>,
+    pub install_command: Option<String>,
+    pub build_command: Option<String>,
+    pub start_command: Option<String>,
+    pub base_directory: Option<String>,
+    pub publish_directory: Option<String>,
+    pub dockerfile: Option<String>,
+    pub dockerfile_location: Option<String>,
+    pub dockerfile_target_build: Option<String>,
+    pub watch_paths: Option<String>,
+    pub pre_deployment_command: Option<String>,
+    pub pre_deployment_command_container: Option<String>,
+    pub post_deployment_command: Option<String>,
+    pub post_deployment_command_container: Option<String>,
+    pub custom_docker_run_options: Option<String>,
+    pub static_image: Option<String>,
     pub env_vars: Vec<EnvVar>,
     pub healthcheck: Option<HealthCheck>,
     pub server_name: Option<String>,
+    /// Per-container handles for Service resources — empty for Applications +
+    /// Databases. Each entry's `uuid` is the value to pass to `tail_logs`
+    /// for per-container log retrieval.
+    #[serde(default)]
+    pub service_containers: Vec<ServiceContainer>,
 }
 
 // ── Raw Coolify response shapes (internal, deserialise-only) ────────────────
@@ -185,6 +221,16 @@ pub(crate) struct RawApplication {
     // `parse_loose_datetime` in `into_resource`.
     pub last_online_at: Option<String>,
     pub updated_at: Option<String>,
+    /// MySQL-style datetime when the container was last restarted. Coolify
+    /// sets this on both manual restarts AND deploys — use
+    /// `last_restart_type` to disambiguate.
+    pub last_restart_at: Option<String>,
+    /// Categorises what triggered `last_restart_at`. Known values include
+    /// `"deploy"` (real redeploy), `"manual"`, `"restart"`, etc. When the
+    /// value is `"deploy"`, `last_restart_at` is effectively the last
+    /// deployment timestamp — saves a per-app /deployments lookup.
+    pub last_restart_type: Option<String>,
+    pub environment_id: Option<i64>,
     pub environment: Option<RawEnvironment>,
     pub destination: Option<RawDestination>,
 }
@@ -199,6 +245,7 @@ pub(crate) struct RawService {
     pub docker_compose_raw: Option<String>,
     pub last_online_at: Option<String>,
     pub updated_at: Option<String>,
+    pub environment_id: Option<i64>,
     pub environment: Option<RawEnvironment>,
     pub destination: Option<RawDestination>,
     /// Coolify nests per-container FQDNs here when the service composes
@@ -210,6 +257,21 @@ pub(crate) struct RawService {
 #[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 pub(crate) struct RawServiceContainerFqdn {
+    pub uuid: Option<String>,
+    pub name: Option<String>,
+    pub image: Option<String>,
+    pub fqdn: Option<String>,
+}
+
+/// One container inside a Coolify Service, surfaced to the frontend so the
+/// Logs tab can build a name→uuid dropdown that hits per-container log
+/// endpoints (Coolify routes service-container logs through the
+/// `/applications/{uuid}/logs` path using the container's own uuid).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServiceContainer {
+    pub uuid: String,
+    pub name: String,
+    pub image: Option<String>,
     pub fqdn: Option<String>,
 }
 
@@ -222,12 +284,14 @@ pub(crate) struct RawDatabase {
     pub image: Option<String>,
     pub last_online_at: Option<String>,
     pub updated_at: Option<String>,
+    pub environment_id: Option<i64>,
     pub environment: Option<RawEnvironment>,
     pub destination: Option<RawDestination>,
 }
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct RawEnvironment {
+    pub uuid: Option<String>,
     pub name: Option<String>,
     pub project: Option<RawProject>,
 }
@@ -276,27 +340,59 @@ fn parse_loose_datetime(s: &str) -> Option<DateTime<Utc>> {
     None
 }
 
-/// Resolve the "Last deploy" timestamp for the overview row.
+/// Resolve a "Last deploy" timestamp for the overview row.
 ///
-/// `last_online_at` is the only field that actually tracks deployments;
-/// `updated_at` is bumped on any config touch (env vars, healthcheck change,
-/// FQDN edit, etc.) and would falsely show "just now" for resources that
-/// haven't deployed in months. So we ONLY use `last_online_at`. If the
-/// resource has never come online, the cell renders `—`.
+/// Per-kind notes:
+/// - Applications: caller passes `last_online_at` + `None`. Apps' final
+///   value is overridden in `ops::list_resources` from the /deployments
+///   `finished` record, so this fallback only matters for non-app kinds.
+/// - Services + Databases (on the user's Coolify version): `last_online_at`
+///   bumps on deploy, NOT on heartbeat — making it a clean deploy proxy.
+///   When it's missing we accept `updated_at` as a secondary fallback;
+///   it's noisier but better than rendering "—" for never-redeployed
+///   services where Coolify only sets `updated_at` at create time.
 ///
 /// Accepts RFC 3339 and MySQL `YYYY-MM-DD HH:MM:SS` (with or without `T`).
 fn pick_last_deployed(
     last_online: Option<String>,
-    _updated: Option<String>,
+    updated: Option<String>,
 ) -> Option<DateTime<Utc>> {
-    last_online.as_deref().and_then(parse_loose_datetime)
+    last_online
+        .as_deref()
+        .and_then(parse_loose_datetime)
+        .or_else(|| updated.as_deref().and_then(parse_loose_datetime))
 }
 
 impl RawApplication {
     pub(crate) fn into_resource(self) -> Resource {
-        let (project_uuid, project_name, environment_name) = unpack_environment(self.environment);
+        let (project_uuid, project_name, environment_uuid, environment_name) =
+            unpack_environment(self.environment);
         let status = parse_status(self.status.as_deref().unwrap_or(""));
-        let last_deployed_at = pick_last_deployed(self.last_online_at, self.updated_at);
+        // last_online_at is the heartbeat (constantly refreshed for running
+        // containers). updated_at gets bumped on status reconciliation,
+        // NOT just real deploys (confirmed by user reports of "just now"
+        // on never-redeployed resources).
+        //
+        // BEST FREE signal in the list response is last_restart_at +
+        // last_restart_type. Coolify sets last_restart_type="deploy" when
+        // the restart was triggered by a deployment — that timestamp IS
+        // the last deploy. ops::list_resources can still OVERRIDE with the
+        // exact /deployments record when its 5-min cache has a value.
+        let last_online_only = pick_last_deployed(self.last_online_at, None);
+        // Defensive matcher: Coolify has used values like "deploy" but
+        // also potentially variants such as "manual_deploy" depending on
+        // version. Substring match covers them all without false-positives
+        // (manual/restart/stop don't contain "deploy").
+        let restart_was_deploy = self
+            .last_restart_type
+            .as_deref()
+            .map(|t| t.to_ascii_lowercase().contains("deploy"))
+            .unwrap_or(false);
+        let last_deploy_from_restart = if restart_was_deploy {
+            pick_last_deployed(self.last_restart_at, None)
+        } else {
+            None
+        };
         // Image refs: prefer registry image (build_pack=dockerimage), else
         // scrape compose YAML (build_pack=dockercompose). Git-built apps
         // have no static image ref to watch.
@@ -317,13 +413,18 @@ impl RawApplication {
             kind: ResourceKind::Application,
             project_uuid,
             project_name,
+            environment_uuid,
             environment_name,
+            environment_id: self.environment_id,
             status,
             fqdn: self.fqdn,
             image_ref: single_image,
             image_refs,
-            last_online_at: last_deployed_at,
-            last_deployed_at: None,
+            last_online_at: last_online_only,
+            // Prefer last_restart_at when last_restart_type=="deploy"
+            // (free signal from list response). ops::list_resources may
+            // override with the more precise /deployments timestamp.
+            last_deployed_at: last_deploy_from_restart,
             build_pack: self.build_pack,
         }
     }
@@ -331,7 +432,8 @@ impl RawApplication {
 
 impl RawService {
     pub(crate) fn into_resource(self) -> Resource {
-        let (project_uuid, project_name, environment_name) = unpack_environment(self.environment);
+        let (project_uuid, project_name, environment_uuid, environment_name) =
+            unpack_environment(self.environment);
         let status = parse_status(self.status.as_deref().unwrap_or(""));
         let last_deployed_at = pick_last_deployed(self.last_online_at, self.updated_at);
         // Coolify's GET /services list does NOT surface FQDN at top-level for
@@ -360,19 +462,25 @@ impl RawService {
             .as_deref()
             .map(scrape_compose_images)
             .unwrap_or_default();
+        // Services on the user's Coolify version bump last_online_at on
+        // real deploy events only (verified runtime — Applications get a
+        // continuous heartbeat there, but Services don't). Use it as the
+        // best-available deploy proxy so the overview column populates.
         Resource {
             uuid: self.uuid.unwrap_or_default(),
             name: self.name.unwrap_or_default(),
             kind: ResourceKind::Service,
             project_uuid,
             project_name,
+            environment_uuid,
             environment_name,
+            environment_id: self.environment_id,
             status,
             fqdn,
             image_ref: None,
             image_refs,
             last_online_at: last_deployed_at,
-            last_deployed_at: None,
+            last_deployed_at,
             build_pack: None,
         }
     }
@@ -555,7 +663,8 @@ fn is_loopback_url(url: &str) -> bool {
 
 impl RawDatabase {
     pub(crate) fn into_resource(self) -> Resource {
-        let (project_uuid, project_name, environment_name) = unpack_environment(self.environment);
+        let (project_uuid, project_name, environment_uuid, environment_name) =
+            unpack_environment(self.environment);
         let status = parse_status(self.status.as_deref().unwrap_or(""));
         let last_deployed_at = pick_last_deployed(self.last_online_at, self.updated_at);
         let image = self.image.clone();
@@ -570,7 +679,9 @@ impl RawDatabase {
             kind: ResourceKind::Database,
             project_uuid,
             project_name,
+            environment_uuid,
             environment_name,
+            environment_id: self.environment_id,
             status,
             fqdn: None,
             image_ref: image,
@@ -582,16 +693,19 @@ impl RawDatabase {
     }
 }
 
-fn unpack_environment(env: Option<RawEnvironment>) -> (Option<String>, Option<String>, Option<String>) {
+fn unpack_environment(
+    env: Option<RawEnvironment>,
+) -> (Option<String>, Option<String>, Option<String>, Option<String>) {
     let Some(e) = env else {
-        return (None, None, None);
+        return (None, None, None, None);
     };
+    let env_uuid = e.uuid;
     let env_name = e.name;
     let (project_uuid, project_name) = match e.project {
         Some(p) => (p.uuid, p.name),
         None => (None, None),
     };
-    (project_uuid, project_name, env_name)
+    (project_uuid, project_name, env_uuid, env_name)
 }
 
 impl RawEnvVar {
@@ -600,6 +714,10 @@ impl RawEnvVar {
             key: self.key.unwrap_or_default(),
             value: self.value.unwrap_or_default(),
             is_secret: self.is_secret.unwrap_or(false),
+            is_preview: false,
+            is_buildtime: false,
+            is_runtime: true,
+            is_shared: false,
         }
     }
 }

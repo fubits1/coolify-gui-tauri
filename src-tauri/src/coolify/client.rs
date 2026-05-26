@@ -184,6 +184,13 @@ impl CoolifyClient {
                         StatusCode::UNAUTHORIZED => return Err(CoolifyError::Unauthorized),
                         StatusCode::FORBIDDEN => return Err(CoolifyError::Forbidden),
                         StatusCode::NOT_FOUND => return Err(CoolifyError::NotFound),
+                        // 429 = rate-limited. Retrying immediately makes it
+                        // worse (Cloudflare in front of Coolify blocks
+                        // bursts). Return fast; caller decides whether to
+                        // back off / cache.
+                        StatusCode::TOO_MANY_REQUESTS => {
+                            return Err(CoolifyError::Server(429));
+                        }
                         s if s.is_server_error() => {
                             warn!(
                                 "coolify {} 5xx (attempt {}/{}): {}",
@@ -201,7 +208,11 @@ impl CoolifyClient {
                         "coolify {} network err (attempt {}/{}): {}",
                         url, attempt, max_attempts, e
                     );
-                    if attempt == max_attempts {
+                    // Cap network-error retries at 2 instead of 4 — the
+                    // typical cause of repeated network errors here is the
+                    // upstream killing connections under rate-limit
+                    // pressure, and our retries make it worse.
+                    if attempt >= 2 {
                         return Err(CoolifyError::Network(e.to_string()));
                     }
                 }

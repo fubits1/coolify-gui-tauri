@@ -29,15 +29,25 @@ Props:
 		TabsContent,
 	} from "$lib/components/ui/tabs";
 	import StatusBadge from "$lib/components/badges/StatusBadge.svelte";
+	import { instance } from "$lib/stores/instance.svelte";
 	import { toast } from "$lib/util/toast";
 	import DeployDialog from "./DeployDialog.svelte";
 	import OverviewTab from "./tabs/OverviewTab.svelte";
 	import EnvTab from "./tabs/EnvTab.svelte";
-	import ComposeTab from "./tabs/ComposeTab.svelte";
-	import LogsTab from "./tabs/LogsTab.svelte";
+	import XIcon from "@lucide/svelte/icons/x";
+	import ExternalLink from "@lucide/svelte/icons/external-link";
+	import BuildTab from "./tabs/BuildTab.svelte";
 	import ImagesTab from "./tabs/ImagesTab.svelte";
 
-	let { resource }: { resource: Resource | null } = $props();
+	let {
+		resource,
+		onClose,
+	}: {
+		resource: Resource | null;
+		/** Caller-provided close handler. Renders an X button inline with
+		 *  the action buttons so it doesn't overlap with Restart/Stop/Deploy. */
+		onClose?: () => void;
+	} = $props();
 
 	type TabKey = "overview" | "env" | "compose" | "logs" | "images";
 	let activeTab = $state<TabKey>("overview");
@@ -64,16 +74,25 @@ Props:
 	// fetched independently so the detail pane renders immediately and the
 	// Env tab populates in a second pass.
 	$effect(() => {
+		// CRITICAL: track ONLY `selectionKey`, not `resource`. The polling
+		// loop reassigns the `resource` prop every 5s with a fresh object —
+		// if this effect read `resource.uuid` reactively, every poll would
+		// wipe `detail` + `envs` (causing the Images tab + Env count badge
+		// to flicker out between blank state and refetch). selectionKey is
+		// a stable `"${kind}:${uuid}"` string; parse uuid + kind from it
+		// so we don't re-subscribe to the resource object itself.
 		const key = selectionKey;
 		detail = null;
 		envs = [];
 		detailError = null;
-		if (key == null || resource == null) return;
+		if (key == null) return;
+		const colon = key.indexOf(":");
+		if (colon === -1) return;
+		const kind = key.slice(0, colon) as Resource["kind"];
+		const uuid = key.slice(colon + 1);
 
 		let cancelled = false;
 		detailLoading = true;
-		const uuid = resource.uuid;
-		const kind = resource.kind;
 		api
 			.getResourceDetail(uuid, kind)
 			.then((d) => {
@@ -114,18 +133,54 @@ Props:
 		activeTab = "overview";
 	});
 
-	const showComposeTab = $derived(
+	const showBuildTab = $derived(
 		resource != null && resource.kind !== "Database",
 	);
+	// Tab label reflects the actual build pack so users don't see "Compose"
+	// on a nixpacks app or vice-versa.
+	const buildTabLabel = $derived.by(() => {
+		const bp = (detail?.build_pack ?? resource?.build_pack ?? "").toLowerCase();
+		if (bp === "dockercompose" || resource?.kind === "Service") return "Compose";
+		if (bp === "dockerfile") return "Dockerfile";
+		if (bp === "nixpacks" || bp === "railpack" || bp === "static") return "Build";
+		return "Build";
+	});
 	// Images tab needs *something* to inspect — either a direct image_ref or
 	// a compose file we can parse refs out of. If neither, hide the tab.
-	const showImagesTab = $derived(
-		resource != null &&
-			(resource.image_ref != null ||
-				(detail?.docker_compose_raw ?? null) != null),
+	// Always render the Images tab trigger. Disable while detail hasn't
+	// loaded; once loaded, the ImagesTab itself renders an empty state
+	// when no image refs are present.
+	const imagesTabReady = $derived(detail != null);
+	const hasAnyImage = $derived(
+		(resource?.image_ref ?? null) != null ||
+			(detail?.docker_compose_raw ?? null) != null,
 	);
 
-	const envCount = $derived(envs.length);
+	/**
+	 * Coolify dashboard logs deep-link.
+	 *   {instance}/project/{project_uuid}/environment/{env_uuid_or_name}/{kind}/{uuid}/logs
+	 * `null` when project_uuid + env identifier aren't both resolved yet (still
+	 *  loading detail / enrichment). The link button hides itself then.
+	 */
+	const dashboardLogsUrl = $derived.by(() => {
+		if (!resource || !instance.url) return null;
+		const projectUuid = detail?.project_uuid ?? resource.project_uuid ?? null;
+		const envSeg =
+			detail?.environment_uuid ??
+			resource.environment_uuid ??
+			detail?.environment_name ??
+			resource.environment_name ??
+			null;
+		if (!projectUuid || !envSeg) return null;
+		const base = instance.url.replace(/\/$/, "");
+		return `${base}/project/${projectUuid}/environment/${envSeg}/${resource.kind.toLowerCase()}/${resource.uuid}/logs`;
+	});
+
+	// Use `!important` variants + dark-mode equivalents to override the
+	// base TabsTrigger classes (which set dark:text-muted-foreground at
+	// higher specificity in the cascade).
+	const activeTabClass =
+		"bg-background shadow-sm font-semibold !text-amber-400 dark:!text-amber-400";
 	const breadcrumb = $derived.by(() => {
 		if (!resource) return "";
 		const parts: string[] = [];
@@ -200,6 +255,17 @@ Props:
 					<Button size="sm" onclick={() => (deployOpen = true)}>
 						Deploy
 					</Button>
+					{#if onClose}
+						<button
+							type="button"
+							class="ml-1 inline-flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground"
+							aria-label="Close detail pane"
+							title="Close (Esc)"
+							onclick={onClose}
+						>
+							<XIcon class="size-4" />
+						</button>
+					{/if}
 				</div>
 			</div>
 
@@ -222,19 +288,50 @@ Props:
 
 		<!-- Tabs -->
 		<Tabs bind:value={activeTab} class="flex-1 min-h-0">
-			<TabsList>
-				<TabsTrigger value="overview">Overview</TabsTrigger>
-				<TabsTrigger value="env">
-					Env{envCount > 0 ? ` (${envCount})` : ""}
-				</TabsTrigger>
-				{#if showComposeTab}
-					<TabsTrigger value="compose">Compose</TabsTrigger>
+			<div class="flex items-center justify-between gap-2">
+				<TabsList>
+					<TabsTrigger
+						value="overview"
+						class={activeTab === "overview" ? activeTabClass : ""}
+					>
+						Overview
+					</TabsTrigger>
+					<TabsTrigger
+						value="env"
+						class={activeTab === "env" ? activeTabClass : ""}
+					>
+						Env
+					</TabsTrigger>
+					{#if showBuildTab}
+						<TabsTrigger
+							value="compose"
+							class={activeTab === "compose" ? activeTabClass : ""}
+						>
+							{buildTabLabel}
+						</TabsTrigger>
+					{/if}
+					<TabsTrigger
+						value="images"
+						class={activeTab === "images" ? activeTabClass : ""}
+						disabled={!imagesTabReady}
+						title={imagesTabReady ? undefined : "Loading detail…"}
+					>
+						Images
+					</TabsTrigger>
+				</TabsList>
+				{#if dashboardLogsUrl}
+					<a
+						href={dashboardLogsUrl}
+						target="_blank"
+						rel="noopener noreferrer"
+						class="inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs text-muted-foreground hover:bg-accent hover:text-foreground"
+						title="Open this resource's Logs in the Coolify dashboard"
+					>
+						Logs
+						<ExternalLink class="size-3.5" />
+					</a>
 				{/if}
-				<TabsTrigger value="logs">Logs</TabsTrigger>
-				{#if showImagesTab}
-					<TabsTrigger value="images">Images</TabsTrigger>
-				{/if}
-			</TabsList>
+			</div>
 
 			<TabsContent value="overview" class="overflow-auto">
 				{#if detailLoading && detail == null}
@@ -242,7 +339,7 @@ Props:
 				{:else if detailError}
 					<div class="text-sm text-destructive">{detailError}</div>
 				{:else if detail}
-					<OverviewTab {detail} />
+					<OverviewTab {detail} {resource} />
 				{/if}
 			</TabsContent>
 
@@ -250,32 +347,33 @@ Props:
 				<EnvTab env={envs} />
 			</TabsContent>
 
-			{#if showComposeTab}
+			{#if showBuildTab}
 				<TabsContent value="compose" class="overflow-auto">
 					{#if detail}
-						<ComposeTab yaml={detail.docker_compose_raw ?? null} />
+						<BuildTab {detail} />
 					{:else if detailLoading}
 						<div class="text-sm text-muted-foreground">Loading…</div>
 					{/if}
 				</TabsContent>
 			{/if}
 
-			<TabsContent value="logs" class="overflow-auto">
-				<LogsTab
-					uuid={resource.uuid}
-					kind={resource.kind}
-					active={activeTab === "logs"}
-				/>
-			</TabsContent>
-
-			{#if showImagesTab}
-				<TabsContent value="images" class="overflow-auto">
+			<TabsContent value="images" class="overflow-auto">
+				{#if !imagesTabReady}
+					<div class="text-sm text-muted-foreground p-4">Loading…</div>
+				{:else if !hasAnyImage}
+					<div
+						class="rounded-md border border-dashed border-border px-4 py-8 text-center text-sm text-muted-foreground"
+					>
+						This resource has no images to track.
+					</div>
+				{:else}
 					<ImagesTab
 						dockerComposeRaw={detail?.docker_compose_raw ?? undefined}
 						imageRef={resource.image_ref ?? undefined}
+						lastDeployedAt={resource.last_deployed_at ?? null}
 					/>
-				</TabsContent>
-			{/if}
+				{/if}
+			</TabsContent>
 		</Tabs>
 
 		<!-- Keyboard hints -->

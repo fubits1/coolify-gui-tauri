@@ -27,9 +27,13 @@ Props:
   let {
     dockerComposeRaw,
     imageRef,
+    lastDeployedAt = null,
   }: {
     dockerComposeRaw?: string;
     imageRef?: string;
+    /** Resource's last-deploy timestamp; lets isStale do publish-time
+     *  drift checks for `:latest` tags. */
+    lastDeployedAt?: string | null;
   } = $props();
 
   /**
@@ -53,8 +57,15 @@ Props:
   });
 
   const staleCount = $derived(
-    rows.filter((r) => imageCache.isStale(r.ref) === "newer-available").length,
+    rows.filter((r) => {
+      const s = imageCache.isStale(r.ref, lastDeployedAt);
+      return s === "newer-digest" || s === "newer-tag";
+    }).length,
   );
+  const unknownCount = $derived(
+    rows.filter((r) => imageCache.isStale(r.ref, lastDeployedAt) === "unknown").length,
+  );
+  const freshCount = $derived(rows.length - staleCount - unknownCount);
 
   function shortDigest(d: string | undefined): string {
     if (!d) return "—";
@@ -63,19 +74,42 @@ Props:
     return hex.slice(0, 12);
   }
 
-  function badgeFor(state: StaleState): { label: string; class: string } {
+  function badgeFor(
+    state: StaleState,
+    tag: string,
+    highestSemverTag: string | undefined,
+  ): { label: string; class: string; title?: string } {
     switch (state) {
       case "fresh":
         return {
           label: "fresh",
           class: "bg-green-600/20 text-green-400 border-green-600/30",
         };
-      case "newer-available":
+      case "newer-digest":
         return {
-          label: "newer available",
+          label: "newer digest",
           class: "bg-amber-600/20 text-amber-400 border-amber-600/30",
+          title:
+            "Current image digest differs from the registry's latest digest — registry has published a different image since this resource was last deployed.",
+        };
+      case "newer-tag":
+        return {
+          label: highestSemverTag
+            ? `newer tag: ${highestSemverTag}`
+            : "newer tag available",
+          class: "bg-amber-600/20 text-amber-400 border-amber-600/30",
+          title:
+            "Registry has a higher semver-named tag than the one this resource is pinned to. (Current container digest is unknown, so we can only compare tag names.)",
         };
       case "unknown":
+        if (tag === "latest") {
+          return {
+            label: "unchecked (:latest)",
+            class: "",
+            title:
+              "Image pinned to :latest. Click Check now — we'll compare the registry's :latest publish time against this resource's last deploy.",
+          };
+        }
         return { label: "unchecked", class: "" };
     }
   }
@@ -103,10 +137,14 @@ Props:
   <div class="flex flex-col gap-3 p-4">
     <div class="flex items-center justify-between">
       <div class="text-sm text-muted-foreground">
-        {#if staleCount === 0}
-          All {rows.length} image{rows.length === 1 ? "" : "s"} up to date.
+        {#if staleCount > 0}
+          {staleCount} of {rows.length} image{rows.length === 1 ? " has" : "s have"} a newer version available.
+        {:else if unknownCount === rows.length}
+          {rows.length === 1 ? "Image" : "All images"} pinned to a floating tag ({rows.length === 1 ? ":latest" : "e.g. :latest"}) — drift can't be determined.
+        {:else if unknownCount > 0}
+          {freshCount} up to date · {unknownCount} with unknown drift (floating tag).
         {:else}
-          {staleCount} of {rows.length} image{rows.length === 1 ? "" : "s"} have a newer version available.
+          All {rows.length} image{rows.length === 1 ? "" : "s"} up to date.
         {/if}
       </div>
       <Button size="sm" variant="outline" onclick={checkAll}>
@@ -114,57 +152,56 @@ Props:
       </Button>
     </div>
 
-    <div class="rounded-md border border-border">
-      <table class="w-full text-sm">
-        <thead class="bg-muted/40 text-xs text-muted-foreground">
-          <tr>
-            <th class="px-3 py-2 text-left font-medium">Service</th>
-            <th class="px-3 py-2 text-left font-medium">Image</th>
-            <th class="px-3 py-2 text-left font-medium">Tag</th>
-            <th class="px-3 py-2 text-left font-mono">Digest</th>
-            <th class="px-3 py-2 text-left font-mono">Latest</th>
-            <th class="px-3 py-2 text-left font-medium">State</th>
-            <th class="px-3 py-2 text-right font-medium">Action</th>
-          </tr>
-        </thead>
-        <tbody>
-          {#each rows as row (row.ref)}
-            {@const entry = imageCache.entries[row.ref]}
-            {@const state = imageCache.isStale(row.ref)}
-            {@const view = badgeFor(state)}
-            {@const isChecking = imageCache.checking.has(row.ref)}
-            <tr class="border-t border-border">
-              <td class="px-3 py-2">{row.service}</td>
-              <td class="px-3 py-2 font-mono text-xs">{row.image}</td>
-              <td class="px-3 py-2 font-mono text-xs">{row.tag}</td>
-              <td class="px-3 py-2 font-mono text-xs" title={entry?.digest ?? ""}>
-                {shortDigest(entry?.digest)}
-              </td>
-              <td
-                class="px-3 py-2 font-mono text-xs"
-                title={entry?.latest_digest ?? ""}
-              >
-                {shortDigest(entry?.latest_digest)}
-              </td>
-              <td class="px-3 py-2">
-                <Badge variant="default" class={view.class}>
-                  {view.label}
-                </Badge>
-              </td>
-              <td class="px-3 py-2 text-right">
-                <Button
-                  size="xs"
-                  variant="outline"
-                  disabled={isChecking}
-                  onclick={() => imageCache.check(row.ref)}
-                >
-                  {isChecking ? "Checking…" : "Check now"}
-                </Button>
-              </td>
-            </tr>
-          {/each}
-        </tbody>
-      </table>
+    <div class="flex flex-col gap-2">
+      {#each rows as row (row.ref)}
+        {@const entry = imageCache.entries[row.ref]}
+        {@const state = imageCache.isStale(row.ref, lastDeployedAt)}
+        {@const view = badgeFor(state, row.tag, entry?.highest_semver_tag)}
+        {@const isChecking = imageCache.checking.has(row.ref)}
+        {@const latestTag =
+          entry?.highest_semver_tag && entry.highest_semver_tag !== row.tag
+            ? entry.highest_semver_tag
+            : null}
+        <div
+          class="flex flex-col gap-1.5 rounded-md border border-border bg-muted/10 px-3 py-2.5"
+        >
+          <!-- Row 1: service name + full image:tag -->
+          <div class="flex items-baseline justify-between gap-2">
+            <span class="text-xs font-semibold">{row.service}</span>
+            <span class="font-mono text-xs text-muted-foreground truncate" title={row.ref}>
+              {row.image}:{row.tag}
+            </span>
+          </div>
+
+          <!-- Row 2: current digest → latest digest / latest tag -->
+          <div class="flex items-center justify-between gap-2 text-[0.7rem] font-mono text-muted-foreground">
+            <span title={entry?.digest ?? "not checked"}>
+              current: {shortDigest(entry?.digest)}
+            </span>
+            <span title={entry?.latest_digest ?? "not checked"}>
+              latest: {shortDigest(entry?.latest_digest)}
+              {#if latestTag}
+                <span class="text-amber-400"> ({latestTag})</span>
+              {/if}
+            </span>
+          </div>
+
+          <!-- Row 3: state badge + check-now -->
+          <div class="flex items-center justify-between gap-2">
+            <Badge variant="default" class={view.class} title={view.title ?? ""}>
+              {view.label}
+            </Badge>
+            <Button
+              size="xs"
+              variant="outline"
+              disabled={isChecking}
+              onclick={() => imageCache.check(row.ref)}
+            >
+              {isChecking ? "Checking…" : "Check now"}
+            </Button>
+          </div>
+        </div>
+      {/each}
     </div>
   </div>
 {/if}

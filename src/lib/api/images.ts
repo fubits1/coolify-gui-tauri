@@ -16,6 +16,11 @@ export interface ImageCacheEntry {
   digest: string;
   latest_digest?: string;
   highest_semver_tag?: string;
+  /** Epoch ms when the registry's current `:latest` (or the highest-named
+   *  tag, for pinned-version refs) was last pushed. Populated by the
+   *  Docker Hub Hub API path. Used to detect `:latest` drift relative
+   *  to the resource's deploy time. */
+  latest_pushed_at?: number | null;
   checked_at: number;
 }
 

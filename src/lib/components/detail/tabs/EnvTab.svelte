@@ -50,8 +50,9 @@ Props:
 		return out;
 	}
 
-	// Production first, then Development. Within each group keep server
-	// order so users see Coolify's own ordering.
+	// Production first, then Development. Within each group sort
+	// alphabetically by key (case-insensitive, locale-aware) so users can
+	// scan/search predictably; Coolify's server order isn't stable.
 	const grouped = $derived.by<{ env: "Production" | "Development"; items: Array<{ v: EnvVar; rowId: string }> }[]>(() => {
 		const prod: { v: EnvVar; rowId: string }[] = [];
 		const dev: { v: EnvVar; rowId: string }[] = [];
@@ -60,6 +61,10 @@ Props:
 			if (v.is_preview) dev.push(entry);
 			else prod.push(entry);
 		});
+		const cmp = (a: { v: EnvVar }, b: { v: EnvVar }) =>
+			a.v.key.localeCompare(b.v.key, undefined, { sensitivity: "base" });
+		prod.sort(cmp);
+		dev.sort(cmp);
 		const out: { env: "Production" | "Development"; items: typeof prod }[] = [];
 		if (prod.length > 0) out.push({ env: "Production", items: prod });
 		if (dev.length > 0) out.push({ env: "Development", items: dev });
@@ -81,7 +86,6 @@ Props:
 					<h3 class="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
 						{group.env}
 					</h3>
-					<span class="text-xs text-muted-foreground">· {group.items.length}</span>
 				</header>
 				<div class="flex flex-col gap-2">
 					{#each group.items as item (item.rowId)}

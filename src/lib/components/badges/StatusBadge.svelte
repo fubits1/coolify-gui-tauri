@@ -47,6 +47,17 @@ Props:
 	});
 </script>
 
+<script module lang="ts">
+	function displayLabel(s: { state: string; health?: string; raw: string }): string {
+		// Coolify reports `running:unknown` whenever no healthcheck is defined
+		// — the ":unknown" suffix is noise, not a problem signal. Strip it.
+		if (s.state === "running" && (!s.health || s.health === "unknown")) {
+			return "running";
+		}
+		return s.raw;
+	}
+</script>
+
 <Badge variant={style.variant} class={style.class} title={status.raw}>
-	{status.raw}
+	{displayLabel(status)}
 </Badge>

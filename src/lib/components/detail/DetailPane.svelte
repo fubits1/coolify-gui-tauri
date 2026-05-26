@@ -35,8 +35,8 @@ Props:
 	import OverviewTab from "./tabs/OverviewTab.svelte";
 	import EnvTab from "./tabs/EnvTab.svelte";
 	import XIcon from "@lucide/svelte/icons/x";
+	import ExternalLink from "@lucide/svelte/icons/external-link";
 	import BuildTab from "./tabs/BuildTab.svelte";
-	import LogsTab from "./tabs/LogsTab.svelte";
 	import ImagesTab from "./tabs/ImagesTab.svelte";
 
 	let {
@@ -147,11 +147,34 @@ Props:
 	});
 	// Images tab needs *something* to inspect — either a direct image_ref or
 	// a compose file we can parse refs out of. If neither, hide the tab.
-	const showImagesTab = $derived(
-		resource != null &&
-			(resource.image_ref != null ||
-				(detail?.docker_compose_raw ?? null) != null),
+	// Always render the Images tab trigger. Disable while detail hasn't
+	// loaded; once loaded, the ImagesTab itself renders an empty state
+	// when no image refs are present.
+	const imagesTabReady = $derived(detail != null);
+	const hasAnyImage = $derived(
+		(resource?.image_ref ?? null) != null ||
+			(detail?.docker_compose_raw ?? null) != null,
 	);
+
+	/**
+	 * Coolify dashboard logs deep-link.
+	 *   {instance}/project/{project_uuid}/environment/{env_uuid_or_name}/{kind}/{uuid}/logs
+	 * `null` when project_uuid + env identifier aren't both resolved yet (still
+	 *  loading detail / enrichment). The link button hides itself then.
+	 */
+	const dashboardLogsUrl = $derived.by(() => {
+		if (!resource || !instance.url) return null;
+		const projectUuid = detail?.project_uuid ?? resource.project_uuid ?? null;
+		const envSeg =
+			detail?.environment_uuid ??
+			resource.environment_uuid ??
+			detail?.environment_name ??
+			resource.environment_name ??
+			null;
+		if (!projectUuid || !envSeg) return null;
+		const base = instance.url.replace(/\/$/, "");
+		return `${base}/project/${projectUuid}/environment/${envSeg}/${resource.kind.toLowerCase()}/${resource.uuid}/logs`;
+	});
 
 	// Use `!important` variants + dark-mode equivalents to override the
 	// base TabsTrigger classes (which set dark:text-muted-foreground at
@@ -265,42 +288,50 @@ Props:
 
 		<!-- Tabs -->
 		<Tabs bind:value={activeTab} class="flex-1 min-h-0">
-			<TabsList>
-				<TabsTrigger
-					value="overview"
-					class={activeTab === "overview" ? activeTabClass : ""}
-				>
-					Overview
-				</TabsTrigger>
-				<TabsTrigger
-					value="env"
-					class={activeTab === "env" ? activeTabClass : ""}
-				>
-					Env
-				</TabsTrigger>
-				{#if showBuildTab}
+			<div class="flex items-center justify-between gap-2">
+				<TabsList>
 					<TabsTrigger
-						value="compose"
-						class={activeTab === "compose" ? activeTabClass : ""}
+						value="overview"
+						class={activeTab === "overview" ? activeTabClass : ""}
 					>
-						{buildTabLabel}
+						Overview
 					</TabsTrigger>
-				{/if}
-				<TabsTrigger
-					value="logs"
-					class={activeTab === "logs" ? activeTabClass : ""}
-				>
-					Logs
-				</TabsTrigger>
-				{#if showImagesTab}
+					<TabsTrigger
+						value="env"
+						class={activeTab === "env" ? activeTabClass : ""}
+					>
+						Env
+					</TabsTrigger>
+					{#if showBuildTab}
+						<TabsTrigger
+							value="compose"
+							class={activeTab === "compose" ? activeTabClass : ""}
+						>
+							{buildTabLabel}
+						</TabsTrigger>
+					{/if}
 					<TabsTrigger
 						value="images"
 						class={activeTab === "images" ? activeTabClass : ""}
+						disabled={!imagesTabReady}
+						title={imagesTabReady ? undefined : "Loading detail…"}
 					>
 						Images
 					</TabsTrigger>
+				</TabsList>
+				{#if dashboardLogsUrl}
+					<a
+						href={dashboardLogsUrl}
+						target="_blank"
+						rel="noopener noreferrer"
+						class="inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs text-muted-foreground hover:bg-accent hover:text-foreground"
+						title="Open this resource's Logs in the Coolify dashboard"
+					>
+						Logs
+						<ExternalLink class="size-3.5" />
+					</a>
 				{/if}
-			</TabsList>
+			</div>
 
 			<TabsContent value="overview" class="overflow-auto">
 				{#if detailLoading && detail == null}
@@ -326,28 +357,23 @@ Props:
 				</TabsContent>
 			{/if}
 
-			<TabsContent value="logs" class="overflow-auto">
-				<LogsTab
-					uuid={resource.uuid}
-					kind={resource.kind}
-					active={activeTab === "logs"}
-					containers={detail?.service_containers ?? []}
-					instanceUrl={instance.url}
-					projectUuid={detail?.project_uuid ?? resource.project_uuid ?? null}
-					environmentUuid={detail?.environment_uuid ?? resource.environment_uuid ?? null}
-					environmentName={detail?.environment_name ?? resource.environment_name ?? null}
-				/>
-			</TabsContent>
-
-			{#if showImagesTab}
-				<TabsContent value="images" class="overflow-auto">
+			<TabsContent value="images" class="overflow-auto">
+				{#if !imagesTabReady}
+					<div class="text-sm text-muted-foreground p-4">Loading…</div>
+				{:else if !hasAnyImage}
+					<div
+						class="rounded-md border border-dashed border-border px-4 py-8 text-center text-sm text-muted-foreground"
+					>
+						This resource has no images to track.
+					</div>
+				{:else}
 					<ImagesTab
 						dockerComposeRaw={detail?.docker_compose_raw ?? undefined}
 						imageRef={resource.image_ref ?? undefined}
 						lastDeployedAt={resource.last_deployed_at ?? null}
 					/>
-				</TabsContent>
-			{/if}
+				{/if}
+			</TabsContent>
 		</Tabs>
 
 		<!-- Keyboard hints -->

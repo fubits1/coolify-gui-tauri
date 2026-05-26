@@ -220,7 +220,7 @@ Props:
 				<TableHead>Type</TableHead>
 				<TableHead>Status</TableHead>
 				<TableHead>FQDN</TableHead>
-				<TableHead title="Applications: real last-deployment timestamp from Coolify's /deployments history. Services/Databases: when the container was last online (blank while running, since the heartbeat is meaningless then).">Last deploy</TableHead>
+				<TableHead title="Applications: real last-deployment timestamp from Coolify's /deployments (finished records only). Services/Databases: last_online_at — on this Coolify version it only bumps on deploy, not heartbeat. Blank when no deploy history is available.">Last deploy</TableHead>
 				<TableHead>Images</TableHead>
 				<TableHead class="text-right">Actions</TableHead>
 			</TableRow>

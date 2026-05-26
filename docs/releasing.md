@@ -35,6 +35,16 @@ Tag-driven, cross-OS, via GitHub Actions
    Tags with `-` (semver pre-release) are auto-flagged
    `prerelease: true` so they don't claim the "Latest" badge.
 
+   **Gotcha — draft persistence across reruns.** `tauri-action` does
+   "update if a draft for this tag already exists" rather than recreate.
+   If a previous failed run created the draft with the wrong
+   `prerelease` value (e.g. because the workflow's expression was
+   hardcoded `false` at the time), subsequent successful runs upload
+   assets to that same draft but DON'T retoggle the prerelease flag.
+   Fix: either check the **"Set as a pre-release"** checkbox manually
+   before clicking Publish, OR delete the stale draft on the Releases
+   page and re-trigger the workflow.
+
 ## Re-trigger an already-pushed tag
 
 If the workflow file changed but the tag commit is old (workflow runs
@@ -141,6 +151,82 @@ Reference: [Tauri Windows signing guide](https://tauri.app/distribute/sign/windo
 `.deb` + `.AppImage` produced by `tauri-action` are unsigned. AppImage
 supports embedded signatures via `gpg`, but most distribution channels
 (direct download, GitHub Release) don't enforce it. Skip for now.
+
+## Known gotchas
+
+### MSI version must be numeric-only
+
+The Windows MSI bundler rejects pre-release identifiers like
+`alpha.1` in the app version. Symptom in CI:
+
+```
+failed to bundle project `optional pre-release identifier in app version
+must be numeric-only and cannot be greater than 65535 for msi target`
+```
+
+Workaround: set a separate MSI-only numeric version in
+`tauri.conf.json`:
+
+```json
+"bundle": {
+  "windows": {
+    "wix": {
+      "version": "0.1.0.1"
+    }
+  }
+}
+```
+
+Keep this in sync with the semver version on each bump (e.g. `0.2.0` →
+`"version": "0.2.0.0"`, `0.2.0-alpha.1` → `"version": "0.2.0.1"`).
+
+### Empty Apple signing env breaks the macOS build
+
+`tauri-action` treats `APPLE_CERTIFICATE` set to an empty string as
+"attempt signing" and dies on `security import`:
+
+```
+security: SecKeychainItemImport: One or more parameters passed to a
+function were not valid.
+failed to bundle project failed codesign application
+```
+
+If you don't have a Developer ID yet, OMIT the entire `APPLE_*` env
+block from the workflow step. Don't leave the keys in with empty
+secret references — `${{ secrets.APPLE_CERTIFICATE }}` returns `""`
+when the secret is unset, which still triggers the signing path.
+Either all six secrets are populated, or none of the env keys are
+present.
+
+### `codeload.github.com` outages cause "action could not be found"
+
+Symptom: the "Set up job" step fails with
+
+```
+##[error]An action could not be found at the URI
+'https://codeload.github.com/...'
+##[error]Failed to download archive ... after 1 attempts.
+```
+
+This is a transient GitHub infrastructure issue — your workflow is
+fine. Re-run the failed jobs:
+
+```bash
+gh run rerun <run-id> --failed
+```
+
+### Node.js 20 deprecation warning
+
+GitHub Actions is migrating actions from Node 20 to Node 24 on
+June 2nd, 2026. Until then, suppress the deprecation warning by
+opting in early at workflow scope:
+
+```yaml
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+```
+
+(Already wired in this repo's `release.yml`.)
 
 ## Auto-updater (future)
 

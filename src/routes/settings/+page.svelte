@@ -325,7 +325,7 @@
 		<CardContent class="flex flex-col gap-2 text-sm">
 			<div class="flex items-center justify-between">
 				<span class="text-muted-foreground">Version</span>
-				<span>0.1.0</span>
+				<span>0.1.0-alpha.1</span>
 			</div>
 			<div class="flex items-center justify-between">
 				<span class="text-muted-foreground">Coolify docs</span>

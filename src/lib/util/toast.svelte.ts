@@ -85,6 +85,15 @@ export const toast = {
       // dismiss-all path; passing `undefined` is treated as "dismiss
       // toast with id=undefined" → no-op. Call WITHOUT args here.
       sonner.dismiss();
+      // Belt-and-suspenders: sonner's dismiss-all has been observed
+      // to miss toasts that are mid-animation or whose internal id
+      // tracking desynced. Yank any remaining DOM nodes ourselves so
+      // the user's intent (clear everything NOW) is honoured.
+      if (typeof document !== "undefined") {
+        for (const node of document.querySelectorAll("[data-sonner-toast]")) {
+          node.remove();
+        }
+      }
     } else {
       activeCount = Math.max(0, activeCount - 1);
       sonner.dismiss(id);

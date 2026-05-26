@@ -49,78 +49,14 @@ Quick platform notes:
 
 ## Release
 
-Version + tag drives the release. The flow:
+Tag-driven cross-OS builds via GitHub Actions
+([`.github/workflows/release.yml`](./.github/workflows/release.yml)).
+Push a `v*` tag → matrix runs on macOS / Linux / Windows → draft GitHub
+Release with `.dmg` + `.msi` + `.AppImage` + `.deb` attached.
 
-1. Bump the version in **both** files (they must match):
-   - `package.json` → `"version"`
-   - `src-tauri/tauri.conf.json` → `"version"`
-   - `src-tauri/Cargo.toml` → `[package] version =`
-2. Commit + tag:
-
-   ```bash
-   git commit -am "release: v0.2.0"
-   git tag v0.2.0
-   git push origin main --tags
-   ```
-
-3. The tag push triggers the cross-OS release workflow (see below).
-
-### Cross-OS releases via GitHub Actions
-
-Tauri builds are produced on three runners in parallel (`macos-latest`, `windows-latest`, `ubuntu-latest`) and the artifacts (`.dmg`, `.msi`, `.AppImage`, `.deb`) are attached to a draft GitHub Release. Tag-triggered.
-
-Wire-up: add `.github/workflows/release.yml` using the official [`tauri-apps/tauri-action`](https://github.com/tauri-apps/tauri-action). Minimal template:
-
-```yaml
-name: release
-on:
-  push:
-    tags: ["v*"]
-
-jobs:
-  build:
-    strategy:
-      fail-fast: false
-      matrix:
-        platform: [macos-latest, ubuntu-latest, windows-latest]
-    runs-on: ${{ matrix.platform }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-        with: { version: 9 }
-      - uses: actions/setup-node@v4
-        with: { node-version: 22, cache: pnpm }
-      - uses: dtolnay/rust-toolchain@stable
-      - if: matrix.platform == 'ubuntu-latest'
-        run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
-      - run: pnpm install --frozen-lockfile
-      - uses: tauri-apps/tauri-action@v0
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          tagName: ${{ github.ref_name }}
-          releaseName: ${{ github.ref_name }}
-          releaseDraft: true
-          prerelease: false
-```
-
-After CI succeeds, the GitHub Release is in draft state — review the artifacts, write release notes, then click **Publish**.
-
-### macOS code signing + notarization (optional)
-
-Unsigned `.dmg` triggers Gatekeeper warnings (`"App is damaged"`). To sign:
-
-1. Get an Apple Developer ID Application certificate.
-2. Add these GitHub secrets and pass them into the `tauri-action` step:
-   - `APPLE_CERTIFICATE` (base64-encoded .p12)
-   - `APPLE_CERTIFICATE_PASSWORD`
-   - `APPLE_SIGNING_IDENTITY` (e.g. `"Developer ID Application: Your Name (TEAMID)"`)
-   - `APPLE_ID`, `APPLE_PASSWORD`, `APPLE_TEAM_ID` for notarization
-3. See [Tauri's signing guide](https://tauri.app/distribute/sign/macos/).
-
-### Windows signing (optional)
-
-Unsigned `.msi` triggers SmartScreen warnings. Requires an EV / OV code-signing certificate; see [Tauri's Windows signing guide](https://tauri.app/distribute/sign/windows/).
+See [`docs/releasing.md`](./docs/releasing.md) for the full procedure,
+including code-signing setup (macOS Developer ID + notarization,
+Windows OV/EV).
 
 ## Tech stack
 
@@ -139,3 +75,4 @@ Unsigned `.msi` triggers SmartScreen warnings. Requires an EV / OV code-signing 
 - [`CONTEXT.md`](./CONTEXT.md) — domain glossary (Resource / Project / Instance / Status / Digest …)
 - [`docs/superpowers/specs/2026-05-25-coolify-gui-design.md`](./docs/superpowers/specs/2026-05-25-coolify-gui-design.md) — locked design + 30-step build sequence
 - [`AGENTS.md`](./AGENTS.md) — conventions for agents and humans working in this repo
+- [`docs/releasing.md`](./docs/releasing.md) — release process + code-signing

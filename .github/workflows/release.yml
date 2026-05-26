@@ -29,12 +29,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # macOS universal binary (Apple Silicon + Intel in one .dmg).
-          # Tauri builds both targets in a single run via the
-          # `universal-apple-darwin` virtual target.
+          # Apple Silicon only — Intel Macs are not a target.
           - os: macos-latest
-            args: --target universal-apple-darwin
-            rust_targets: aarch64-apple-darwin,x86_64-apple-darwin
+            args: --target aarch64-apple-darwin
+            rust_targets: aarch64-apple-darwin
           - os: ubuntu-latest
             args: ""
             rust_targets: x86_64-unknown-linux-gnu

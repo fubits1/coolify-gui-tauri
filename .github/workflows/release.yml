@@ -1,9 +1,25 @@
 name: release
 
+# Triggered by any tag matching `v*` (e.g. `v0.1.0-alpha.1`, `v1.2.3`).
+# Creates a DRAFT GitHub Release with platform artifacts attached;
+# review the assets + write release notes, then publish manually.
+#
+# Tags containing `-` (semver pre-release) are marked `prerelease: true`
+# automatically — so alpha/beta/rc builds don't show up as the "Latest"
+# release in the GitHub sidebar.
 on:
   push:
     tags:
       - "v*"
+  # Manual trigger from the Actions tab → "Run workflow" button.
+  # Pass an existing tag name to build from; the release is still
+  # attached to that tag.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to build (e.g. v0.1.0-alpha.1)"
+        required: true
+        type: string
 
 jobs:
   release:
@@ -13,13 +29,25 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { os: macos-latest, target: aarch64-apple-darwin }
-          - { os: macos-latest, target: x86_64-apple-darwin }
-          - { os: ubuntu-22.04, target: x86_64-unknown-linux-gnu }
-          - { os: windows-latest, target: x86_64-pc-windows-msvc }
+          # macOS universal binary (Apple Silicon + Intel in one .dmg).
+          # Tauri builds both targets in a single run via the
+          # `universal-apple-darwin` virtual target.
+          - os: macos-latest
+            args: --target universal-apple-darwin
+            rust_targets: aarch64-apple-darwin,x86_64-apple-darwin
+          - os: ubuntu-latest
+            args: ""
+            rust_targets: x86_64-unknown-linux-gnu
+          - os: windows-latest
+            args: ""
+            rust_targets: x86_64-pc-windows-msvc
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          # For workflow_dispatch we checkout the user-supplied tag;
+          # for tag-push triggers, github.ref_name is the tag itself.
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref_name }}
 
       - uses: pnpm/action-setup@v4
         with:
@@ -32,24 +60,45 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.target }}
+          targets: ${{ matrix.rust_targets }}
 
-      - if: matrix.os == 'ubuntu-22.04'
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "./src-tauri -> target"
+
+      - name: Install Linux build deps
+        if: matrix.os == 'ubuntu-latest'
         run: |
-          sudo apt update
-          sudo apt install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            libsoup-3.0-dev \
+            libjavascriptcoregtk-4.1-dev
 
       - run: pnpm install --frozen-lockfile
 
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # macOS signing + notarization secrets — optional. Builds
+          # produce unsigned `.dmg` when these are absent (Gatekeeper
+          # warning on install). Add them in repo Settings → Secrets
+          # once you have a Developer ID certificate.
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          TAG_NAME: ${{ github.ref_name }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         with:
-          tagName: ${{ github.ref_name }}
-          releaseName: "Coolify GUI ${{ github.ref_name }}"
+          tagName: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref_name }}
+          releaseName: "Coolify GUI ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref_name }}"
+          releaseBody: |
+            Built from tag `${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref_name }}`. See assets below for
+            installers per platform.
           releaseDraft: true
-          prerelease: false
-          args: --target ${{ matrix.target }}
+          prerelease: ${{ contains(github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref_name, '-') }}
+          args: ${{ matrix.args }}

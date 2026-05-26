@@ -14,6 +14,7 @@ fresh first-run state.
 <script lang="ts">
 	import Plus from "@lucide/svelte/icons/plus";
 	import XIcon from "@lucide/svelte/icons/x";
+	import { getVersion } from "@tauri-apps/api/app";
 	import { instances } from "$lib/stores/instances.svelte";
 	import { connectionRegistry } from "$lib/stores/connection.svelte";
 	import { toast } from "$lib/util/toast.svelte";
@@ -23,6 +24,14 @@ fresh first-run state.
 	}: {
 		onAddRequested: () => void;
 	} = $props();
+
+	// Read the version from Tauri's bundle metadata (tauri.conf.json's
+	// `version` field — single source of truth). Hardcoding here would
+	// drift; this stays in sync automatically on every build.
+	let version = $state<string>("");
+	getVersion()
+		.then((v) => (version = v))
+		.catch(() => {});
 
 	function dotClass(state: "connected" | "reconnecting" | "offline"): string {
 		switch (state) {
@@ -91,4 +100,12 @@ fresh first-run state.
 		<Plus class="size-3.5" />
 		Add
 	</button>
+	{#if version}
+		<span
+			class="ml-auto select-none font-mono text-[0.65rem] text-muted-foreground"
+			title="Coolify GUI version"
+		>
+			v{version}
+		</span>
+	{/if}
 </div>

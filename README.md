@@ -36,14 +36,91 @@ Prerequisites: [Rust](https://rustup.rs), Node 22, [pnpm](https://pnpm.io) 9, an
 ```bash
 pnpm install
 pnpm tauri dev      # dev loop with HMR
-pnpm tauri build    # bundle for the current OS
+pnpm tauri build    # bundle for the CURRENT OS only
 ```
+
+`pnpm tauri build` produces installers under `src-tauri/target/release/bundle/` for whichever OS you ran the command on — macOS gives you `.dmg` + `.app`, Windows gives `.msi` + `.exe`, Linux gives `.deb` + `.AppImage`. Tauri does **not** cross-compile; building all three platforms requires either three machines or CI runners (see "Cross-OS releases" below).
 
 Quick platform notes:
 
 - **macOS** — Xcode CLT (`xcode-select --install`).
 - **Linux** — `libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf`.
 - **Windows** — WebView2 runtime + MSVC build tools.
+
+## Release
+
+Version + tag drives the release. The flow:
+
+1. Bump the version in **both** files (they must match):
+   - `package.json` → `"version"`
+   - `src-tauri/tauri.conf.json` → `"version"`
+   - `src-tauri/Cargo.toml` → `[package] version =`
+2. Commit + tag:
+
+   ```bash
+   git commit -am "release: v0.2.0"
+   git tag v0.2.0
+   git push origin main --tags
+   ```
+
+3. The tag push triggers the cross-OS release workflow (see below).
+
+### Cross-OS releases via GitHub Actions
+
+Tauri builds are produced on three runners in parallel (`macos-latest`, `windows-latest`, `ubuntu-latest`) and the artifacts (`.dmg`, `.msi`, `.AppImage`, `.deb`) are attached to a draft GitHub Release. Tag-triggered.
+
+Wire-up: add `.github/workflows/release.yml` using the official [`tauri-apps/tauri-action`](https://github.com/tauri-apps/tauri-action). Minimal template:
+
+```yaml
+name: release
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [macos-latest, ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with: { version: 9 }
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: pnpm }
+      - uses: dtolnay/rust-toolchain@stable
+      - if: matrix.platform == 'ubuntu-latest'
+        run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+      - run: pnpm install --frozen-lockfile
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: ${{ github.ref_name }}
+          releaseDraft: true
+          prerelease: false
+```
+
+After CI succeeds, the GitHub Release is in draft state — review the artifacts, write release notes, then click **Publish**.
+
+### macOS code signing + notarization (optional)
+
+Unsigned `.dmg` triggers Gatekeeper warnings (`"App is damaged"`). To sign:
+
+1. Get an Apple Developer ID Application certificate.
+2. Add these GitHub secrets and pass them into the `tauri-action` step:
+   - `APPLE_CERTIFICATE` (base64-encoded .p12)
+   - `APPLE_CERTIFICATE_PASSWORD`
+   - `APPLE_SIGNING_IDENTITY` (e.g. `"Developer ID Application: Your Name (TEAMID)"`)
+   - `APPLE_ID`, `APPLE_PASSWORD`, `APPLE_TEAM_ID` for notarization
+3. See [Tauri's signing guide](https://tauri.app/distribute/sign/macos/).
+
+### Windows signing (optional)
+
+Unsigned `.msi` triggers SmartScreen warnings. Requires an EV / OV code-signing certificate; see [Tauri's Windows signing guide](https://tauri.app/distribute/sign/windows/).
 
 ## Tech stack
 

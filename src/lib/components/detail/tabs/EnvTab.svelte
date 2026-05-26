@@ -15,7 +15,7 @@ Props:
 <script lang="ts">
 	import type { EnvVar } from "$lib/api/types";
 	import { Button } from "$lib/components/ui/button";
-	import { toast } from "$lib/util/toast";
+	import { toast } from "$lib/util/toast.svelte";
 	import { SvelteSet } from "svelte/reactivity";
 
 	let { env }: { env: EnvVar[] } = $props();

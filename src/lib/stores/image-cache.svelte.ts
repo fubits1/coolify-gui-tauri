@@ -1,6 +1,6 @@
 import { images, type ImageCacheEntry } from "$lib/api/images";
 import { parseSemver, compareSemver } from "$lib/util/semver";
-import { toast } from "$lib/util/toast";
+import { toast } from "$lib/util/toast.svelte";
 
 /**
  * Image-cache store — frontend mirror of the Rust-side digest cache.
@@ -81,6 +81,13 @@ class ImageCacheStore {
       this.entries = { ...this.entries, [imageRef]: entry };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
+      // Quiet errors that just mean "ref is a compose template variable
+      // we can't resolve" — those would multiply into one toast per
+      // unresolved ref on instances that pin via ${VAR}.
+      if (/invalid reference format/i.test(msg)) {
+        console.debug(`[imageCache] skip unresolvable ref: ${imageRef}`);
+        return;
+      }
       toast.error(`Image check failed: ${imageRef}`, msg);
     } finally {
       this.checking.delete(imageRef);

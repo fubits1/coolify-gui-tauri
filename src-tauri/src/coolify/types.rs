@@ -521,10 +521,61 @@ fn scrape_compose_images(yaml: &str) -> Vec<String> {
         if value.starts_with('$') {
             continue;
         }
-        out.push(value.to_string());
+        // Substitute `${VAR:-default}` → `default` (compose's "default
+        // when unset" syntax). For `${VAR}` with no default, we have no
+        // value to use, so skip the whole ref — checking it would error
+        // out with "invalid reference format" downstream.
+        let resolved = resolve_compose_var_defaults(value);
+        if resolved.contains("${") {
+            continue;
+        }
+        out.push(resolved);
     }
     out.sort();
     out.dedup();
+    out
+}
+
+/// Replace every occurrence of `${VAR:-default}` in `s` with `default`.
+/// `${VAR}` (no default) is left intact so the caller can detect it and
+/// skip the ref. Operates on the byte string with a hand-rolled scanner
+/// — no regex dependency just for this.
+fn resolve_compose_var_defaults(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if i + 1 < bytes.len() && bytes[i] == b'$' && bytes[i + 1] == b'{' {
+            // Find the closing `}` and detect `:-` inside.
+            let mut j = i + 2;
+            let mut default_start: Option<usize> = None;
+            while j < bytes.len() && bytes[j] != b'}' {
+                if default_start.is_none()
+                    && j + 1 < bytes.len()
+                    && bytes[j] == b':'
+                    && bytes[j + 1] == b'-'
+                {
+                    default_start = Some(j + 2);
+                }
+                j += 1;
+            }
+            if j < bytes.len() && bytes[j] == b'}' {
+                if let Some(start) = default_start {
+                    if let Ok(default) = std::str::from_utf8(&bytes[start..j]) {
+                        out.push_str(default);
+                    }
+                } else {
+                    // No default — preserve the original `${VAR}` so the
+                    // caller can detect + skip.
+                    out.push_str(&s[i..=j]);
+                }
+                i = j + 1;
+                continue;
+            }
+        }
+        out.push(s.as_bytes()[i] as char);
+        i += 1;
+    }
     out
 }
 

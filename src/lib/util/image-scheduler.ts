@@ -1,6 +1,6 @@
 import type { Resource } from "$lib/api/types";
 import { imageCache, isNewerState } from "$lib/stores/image-cache.svelte";
-import { toast } from "$lib/util/toast";
+import { toast } from "$lib/util/toast.svelte";
 
 /**
  * Image-freshness scheduler — runs once at app boot.

@@ -6,104 +6,101 @@
 	import DetailPane from "$lib/components/detail/DetailPane.svelte";
 	import DeployDialog from "$lib/components/detail/DeployDialog.svelte";
 	import ConnectionStrip from "$lib/components/shell/ConnectionStrip.svelte";
+	import InstanceTabStrip from "$lib/components/shell/InstanceTabStrip.svelte";
 	import { Button } from "$lib/components/ui/button";
 	import { RefreshCw, Settings } from "@lucide/svelte";
 	import { api } from "$lib/api/client";
 	import type { ResourceKind } from "$lib/api/types";
-	import { instance } from "$lib/stores/instance.svelte";
-	import { resources } from "$lib/stores/resources.svelte";
-	import { connection } from "$lib/stores/connection.svelte";
+	import { instances } from "$lib/stores/instances.svelte";
+	import {
+		resourcesRegistry,
+		pollingController,
+		type ResourcesStore,
+	} from "$lib/stores/resources.svelte";
+	import {
+		connectionRegistry,
+		type ConnectionStore,
+	} from "$lib/stores/connection.svelte";
 	import { imageCache, isNewerState } from "$lib/stores/image-cache.svelte";
 	import { runStartupCheck } from "$lib/util/image-scheduler";
 	import { installShortcuts } from "$lib/util/shortcuts";
-	import { toast } from "$lib/util/toast";
+	import { toast } from "$lib/util/toast.svelte";
 
 	// Kick off persisted-state loads on mount. Both stores are reactive once
-	// these resolve, so the UI rerenders automatically.
-	instance.load();
-	imageCache.load();
+	// these resolve, so the UI rerenders automatically. `instances.load()`
+	// also hydrates each instance's keyring token + sets its `ready` flag
+	// before assigning `this.list`, so we never have to set $state from
+	// inside a $effect (banned by `code-style-svelte`).
+	void instances.load();
+	void imageCache.load();
 
-	// Tri-state hydration: null while we wait for instance.load + the keyring
-	// rehydration to settle; false → no stored token, show ConnectScreen;
-	// true → token rehydrated, client is live in Rust state.
-	let credentialsReady = $state<boolean | null>(null);
-	let credentialsProbedUrl = $state<string | null>(null);
-
-	$effect(() => {
-		const url = instance.url;
-		if (url == null) {
-			// Either still loading, or user signed out — reset probe state so a
-			// future url change re-triggers loadCredentials.
-			if (credentialsProbedUrl != null) {
-				credentialsReady = null;
-				credentialsProbedUrl = null;
-			}
-			return;
-		}
-		if (credentialsProbedUrl === url) return;
-		credentialsProbedUrl = url;
-		void (async () => {
-			try {
-				const ok = await api.loadCredentials(url, instance.alias ?? undefined);
-				credentialsReady = ok;
-			} catch (err) {
-				const msg = err instanceof Error ? err.message : String(err);
-				toast.error("Failed to load credentials", msg);
-				credentialsReady = false;
-			}
-		})();
-	});
-
-	const onboarded = $derived(instance.url != null && credentialsReady === true);
+	const activeInstance = $derived(instances.active);
+	const activeResources: ResourcesStore | null = $derived(
+		activeInstance ? resourcesRegistry.get(activeInstance.id) : null,
+	);
+	const activeConnection: ConnectionStore | null = $derived(
+		activeInstance ? connectionRegistry.get(activeInstance.id) : null,
+	);
+	const activeReady = $derived(activeInstance?.ready === true);
 
 	let viewMode = $state<"table" | "cards">("table");
 	let deployTarget = $state<{ uuid: string; kind: ResourceKind } | null>(null);
+	let addingInstance = $state(false);
 
-	// Single boot guard: must wait for credentialsReady=true (load_credentials
-	// resolved and the Rust client is live). Firing resources.start() on
-	// instance.url alone races the keyring probe and the first poll hits
-	// "no Coolify credentials set" before the client is built.
-	let bootStarted = false;
+	// Polling lifecycle: only the active instance polls. `pollingController`
+	// holds the "currently running id" in a NON-reactive private field, so
+	// we can call switchTo() from a $effect without violating "no $effect
+	// writes to $state". The store's own list/loading/etc are $state, but
+	// that's a side effect of the polling running — not a re-render of
+	// reactive data assigned by this effect.
 	$effect(() => {
-		if (
-			instance.url == null ||
-			credentialsReady !== true ||
-			bootStarted
-		)
-			return;
-		bootStarted = true;
-		void (async () => {
-			await resources.start();
-			void runStartupCheck(resources.list);
-		})();
+		const next = activeInstance;
+		void pollingController.switchTo(next?.ready ? next.id : null);
 	});
 
-	function handleConnected(url: string, _alias: string) {
-		// ConnectScreen has already called instance.save() and set_credentials
-		// (which persists the token to the keyring + builds the live client).
-		// Mark the keyring rehydration as already-satisfied for this url so the
-		// boot effect doesn't redundantly probe.
-		credentialsReady = true;
-		credentialsProbedUrl = url;
-		instance.load();
+	// Image-freshness scheduler runs ONCE per (instance, app boot). The
+	// scheduler itself already has a 24h cache gate, but firing it every
+	// time `activeResources.list` mutates (every 5s poll) is wasteful: it
+	// reads the on-disk cache, filters, and toasts a summary even when no
+	// new check is due. Track which instances we've already kicked off
+	// during this app session and skip subsequent calls.
+	const startupCheckedInstances = new Set<string>();
+	$effect(() => {
+		const inst = activeInstance;
+		const store = activeResources;
+		if (!inst || !store || store.list.length === 0) return;
+		if (startupCheckedInstances.has(inst.id)) return;
+		startupCheckedInstances.add(inst.id);
+		void runStartupCheck(store.list);
+	});
+
+	function handleConnected(id: string) {
+		addingInstance = false;
+		void instances.setActive(id);
 	}
 
 	async function handleRestart(uuid: string, kind: ResourceKind) {
-		await toast.promise(api.restart(uuid, kind), {
+		if (!activeInstance || !activeResources) return;
+		const instId = activeInstance.id;
+		await toast.promise(api.restart(instId, uuid, kind), {
 			loading: "Restarting…",
 			success: "Restart triggered",
-			error: (e) => `Restart failed: ${e instanceof Error ? e.message : String(e)}`,
+			error: (e) =>
+				`Restart failed: ${e instanceof Error ? e.message : String(e)}`,
 		});
-		await resources.refresh();
+		await activeResources.refresh();
 	}
 
 	async function handleStop(uuid: string, kind: ResourceKind) {
-		await toast.promise(api.stop(uuid, kind), {
+		if (!activeInstance || !activeResources) return;
+		const instId = activeInstance.id;
+		await toast.promise(api.stop(instId, uuid, kind), {
 			loading: "Stopping…",
 			success: "Stop triggered",
-			error: (e) => `Stop failed: ${e instanceof Error ? e.message : String(e)}`,
+			error: (e) =>
+				`Stop failed: ${e instanceof Error ? e.message : String(e)}`,
 		});
-		await resources.refresh();
+		await activeResources.refresh();
 	}
 
 	function handleDeploy(uuid: string, kind: ResourceKind) {
@@ -113,35 +110,25 @@
 	async function handleDeployConfirm(force: boolean) {
 		const target = deployTarget;
 		deployTarget = null;
-		if (!target) return;
-		await toast.promise(api.deploy(target.uuid, force), {
+		if (!target || !activeInstance || !activeResources) return;
+		const instId = activeInstance.id;
+		await toast.promise(api.deploy(instId, target.uuid, force), {
 			loading: "Deploying…",
 			success: force ? "Deploy (force) triggered" : "Deploy triggered",
-			error: (e) => `Deploy failed: ${e instanceof Error ? e.message : String(e)}`,
+			error: (e) =>
+				`Deploy failed: ${e instanceof Error ? e.message : String(e)}`,
 		});
-		await resources.refresh();
+		await activeResources.refresh();
 	}
 
-	// Overview-header "Check all images": collect refs across the entire list
-	// (compose YAML refs ∪ direct image_ref) and fan out a batched check.
-	// `runStartupCheck` already encapsulates the detail-fetch-for-compose
-	// dance, so we reuse it rather than re-implementing here.
 	async function handleCheckAllImages() {
-		// Manual "Check all images" BYPASSES the scheduler's 24h cache gate.
-		// Collect every image ref across the resource list and force a fresh
-		// batch via imageCache.checkMany. After the batch settles, count
-		// newer-available ACROSS ALL refs and toast a single summary so we
-		// don't claim "up to date" when some entries are stale.
+		if (!activeResources) return;
 		const refs = new Set<string>();
-		// Track each ref's owning resource so :latest drift can use the
-		// resource's last_deployed_at when classifying after the batch.
 		const refDeployTimes = new Map<string, string | null>();
-		for (const r of resources.list) {
+		for (const r of activeResources.list) {
 			for (const ref of r.image_refs ?? []) {
 				if (!ref || ref.trim().length === 0) continue;
 				refs.add(ref);
-				// First resource wins — same image deployed twice picks
-				// the earliest deploy timestamp seen (most pessimistic).
 				if (!refDeployTimes.has(ref)) {
 					refDeployTimes.set(ref, r.last_deployed_at ?? null);
 				}
@@ -168,10 +155,9 @@
 		}
 	}
 
-	// Global keyboard shortcuts. Re-installs whenever the selected resource
-	// changes so handlers close over the current selection without polling.
 	$effect(() => {
-		const selected = resources.selectedResource;
+		const store = activeResources;
+		const selected = store?.selectedResource ?? null;
 		const cleanup = installShortcuts({
 			onRestart: selected
 				? () => void handleRestart(selected.uuid, selected.kind)
@@ -184,88 +170,109 @@
 			onCheckImages: selected?.image_ref
 				? () => void imageCache.checkMany([selected.image_ref as string])
 				: undefined,
-			onLogs: undefined, // future: switch DetailPane to Logs tab
-			onEscape: selected ? () => resources.select(null) : undefined,
+			onLogs: undefined,
+			onEscape: store && selected ? () => store.select(null) : undefined,
 		});
 		return cleanup;
 	});
 </script>
 
-{#if instance.url != null && credentialsReady === null}
-	<!-- Probing the keyring after a cold-start with a persisted URL.
-	     Render an empty shell so we don't flash ConnectScreen. -->
-	<div class="flex min-h-screen items-center justify-center bg-background"></div>
-{:else if !onboarded}
+{#if instances.list.length === 0}
 	<ConnectScreen onConnected={handleConnected} />
 {:else}
 	<div class="flex h-screen flex-col">
-		<ConnectionStrip
-			state={connection.state}
-			alias={instance.alias}
-			retryInSec={connection.reconnectInSec ?? 0}
-		/>
+		<InstanceTabStrip onAddRequested={() => (addingInstance = true)} />
 
-		<div class="flex items-center justify-between gap-2 border-b border-border px-4 py-2">
-			<h1 class="text-sm font-semibold">Resources</h1>
-			<div class="flex items-center gap-2">
-				<ViewToggle mode={viewMode} onChange={(m) => (viewMode = m)} />
-				<Button
-					variant="outline"
-					size="sm"
-					onclick={() => void resources.refresh()}
-					disabled={resources.loading}
-				>
-					<RefreshCw />
-					Refresh
-				</Button>
-				<Button
-					variant="outline"
-					size="icon-sm"
-					aria-label="Settings"
-					title="Settings"
-					href="/settings"
-				>
-					<Settings />
-				</Button>
+		{#if addingInstance}
+			<div class="border-b border-border bg-muted/10">
+				<ConnectScreen embed onConnected={handleConnected} />
+				<div class="flex justify-end px-4 pb-2">
+					<Button
+						variant="ghost"
+						size="sm"
+						onclick={() => (addingInstance = false)}
+					>
+						Cancel
+					</Button>
+				</div>
 			</div>
-		</div>
+		{/if}
 
-		<div class="flex min-h-0 flex-1">
-			<div class="flex min-h-0 min-w-0 flex-1 flex-col p-4">
-				{#if viewMode === "table"}
-					<TableView
-						resources={resources.list}
-						selectedUuid={resources.selectedUuid}
-						onSelect={(uuid) => resources.select(uuid)}
-						onRestart={handleRestart}
-						onStop={handleStop}
-						onDeploy={handleDeploy}
-						onCheckImages={handleCheckAllImages}
-					/>
-				{:else}
-					<CardsView
-						resources={resources.list}
-						selectedUuid={resources.selectedUuid}
-						onSelect={(uuid) => resources.select(uuid)}
-						onRestart={handleRestart}
-						onStop={handleStop}
-						onDeploy={handleDeploy}
-						onCheckImages={handleCheckAllImages}
-					/>
+		{#if activeInstance && activeReady && activeResources && activeConnection}
+			<ConnectionStrip
+				state={activeConnection.state}
+				alias={activeInstance.alias}
+				retryInSec={activeConnection.reconnectInSec ?? 0}
+			/>
+
+			<div class="flex items-center justify-between gap-2 border-b border-border px-4 py-2">
+				<h1 class="text-sm font-semibold">Resources</h1>
+				<div class="flex items-center gap-2">
+					<ViewToggle mode={viewMode} onChange={(m) => (viewMode = m)} />
+					<Button
+						variant="outline"
+						size="sm"
+						onclick={() => void activeResources.refresh()}
+						disabled={activeResources.loading}
+					>
+						<RefreshCw />
+						Refresh
+					</Button>
+					<Button
+						variant="outline"
+						size="icon-sm"
+						aria-label="Settings"
+						title="Settings"
+						href="/settings"
+					>
+						<Settings />
+					</Button>
+				</div>
+			</div>
+
+			<div class="flex min-h-0 flex-1">
+				<div class="flex min-h-0 min-w-0 flex-1 flex-col p-4">
+					{#if viewMode === "table"}
+						<TableView
+							resources={activeResources.list}
+							selectedUuid={activeResources.selectedUuid}
+							onSelect={(uuid) => activeResources.select(uuid)}
+							onRestart={handleRestart}
+							onStop={handleStop}
+							onDeploy={handleDeploy}
+							onCheckImages={handleCheckAllImages}
+						/>
+					{:else}
+						<CardsView
+							resources={activeResources.list}
+							selectedUuid={activeResources.selectedUuid}
+							onSelect={(uuid) => activeResources.select(uuid)}
+							onRestart={handleRestart}
+							onStop={handleStop}
+							onDeploy={handleDeploy}
+							onCheckImages={handleCheckAllImages}
+						/>
+					{/if}
+				</div>
+
+				{#if activeResources.selectedResource}
+					<aside
+						class="relative w-1/2 min-w-[24rem] shrink-0 overflow-auto border-l border-border"
+					>
+						<DetailPane
+							instanceId={activeInstance.id}
+							instanceUrl={activeInstance.url}
+							resource={activeResources.selectedResource}
+							onClose={() => activeResources.select(null)}
+						/>
+					</aside>
 				{/if}
 			</div>
-
-			{#if resources.selectedResource}
-				<aside
-					class="relative w-1/2 min-w-[24rem] shrink-0 overflow-auto border-l border-border"
-				>
-					<DetailPane
-						resource={resources.selectedResource}
-						onClose={() => resources.select(null)}
-					/>
-				</aside>
-			{/if}
-		</div>
+		{:else if activeInstance && !activeReady}
+			<div class="flex flex-1 items-center justify-center text-sm text-muted-foreground">
+				Hydrating {activeInstance.alias}…
+			</div>
+		{/if}
 	</div>
 
 	<DeployDialog

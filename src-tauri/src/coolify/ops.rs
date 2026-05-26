@@ -67,16 +67,14 @@ pub async fn test_connection(url: String, token: String) -> Result<TestConnectio
 /// (handles token rotation).
 #[tauri::command]
 pub async fn set_credentials(
+    instance_id: String,
     url: String,
     token: String,
-    alias: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    let alias = alias.unwrap_or_else(|| "default".to_string());
-    crate::secrets::save_token(&alias, &token)?;
+    crate::secrets::save_token(&instance_id, &token)?;
     let client = CoolifyClient::new(&url, &token).map_err(|e| e.to_string())?;
-    let mut guard = state.client.write().await;
-    *guard = Some(client);
+    state.clients.write().await.insert(instance_id, client);
     Ok(())
 }
 
@@ -88,26 +86,24 @@ pub async fn set_credentials(
 /// `ConnectScreen`). Errors surface only on keyring access failures.
 #[tauri::command]
 pub async fn load_credentials(
+    instance_id: String,
     url: String,
-    alias: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<bool, String> {
-    // Fast path: if a client is already built for this process, return ok
-    // without touching the OS keyring. Prevents a Keychain prompt on every
-    // Svelte HMR / Cmd+R during dev iteration.
+    // Fast path: skip keyring lookup if this instance's client is already
+    // live for this process (prevents a Keychain prompt on every Svelte
+    // HMR / Cmd+R during dev iteration).
     {
-        let guard = state.client.read().await;
-        if guard.is_some() {
+        let guard = state.clients.read().await;
+        if guard.contains_key(&instance_id) {
             return Ok(true);
         }
     }
 
-    let alias = alias.unwrap_or_else(|| "default".to_string());
-    match crate::secrets::load_token(&alias)? {
+    match crate::secrets::load_token(&instance_id)? {
         Some(token) => {
             let client = CoolifyClient::new(&url, &token).map_err(|e| e.to_string())?;
-            let mut guard = state.client.write().await;
-            *guard = Some(client);
+            state.clients.write().await.insert(instance_id, client);
             Ok(true)
         }
         None => Ok(false),
@@ -119,12 +115,14 @@ pub async fn load_credentials(
 /// (URL + alias) so the next boot drops the user back at `ConnectScreen`.
 #[tauri::command]
 pub async fn clear_credentials(
-    alias: Option<String>,
+    instance_id: String,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    let alias = alias.unwrap_or_else(|| "default".to_string());
-    crate::secrets::delete_token(&alias)?;
-    *state.client.write().await = None;
+    crate::secrets::delete_token(&instance_id)?;
+    state.clients.write().await.remove(&instance_id);
+    state.deploy_cache.write().await.remove(&instance_id);
+    state.service_fqdn_cache.write().await.remove(&instance_id);
+    state.project_env_cache.write().await.remove(&instance_id);
     Ok(())
 }
 
@@ -135,9 +133,10 @@ pub async fn clear_credentials(
 /// whole call fails (callers retry via the polling loop).
 #[tauri::command]
 pub async fn list_resources(
+    instance_id: String,
     state: State<'_, AppState>,
 ) -> Result<ListResourcesResult, String> {
-    let client = clone_client(&state).await?;
+    let client = clone_client(&state, &instance_id).await?;
     let apps_fut = client.get::<Vec<RawApplication>>("api/v1/applications");
     let svcs_fut = client.get::<Vec<RawService>>("api/v1/services");
     let dbs_fut = client.get::<Vec<RawDatabase>>("api/v1/databases");
@@ -159,7 +158,7 @@ pub async fn list_resources(
                 .map(RawApplication::into_resource)
                 .collect();
             let uuids: Vec<String> = resources.iter().map(|r| r.uuid.clone()).collect();
-            let deploys = fetch_last_deployments(&client, &state, &uuids).await;
+            let deploys = fetch_last_deployments(&client, &state, &instance_id, &uuids).await;
             for mut r in resources {
                 // Only OVERRIDE the updated_at fallback when the deploys
                 // lookup actually returned a timestamp. A None means
@@ -189,7 +188,7 @@ pub async fn list_resources(
                 .filter(|r| r.fqdn.is_none() || r.fqdn.as_deref().map(|s| s.is_empty()).unwrap_or(true))
                 .map(|r| r.uuid.clone())
                 .collect();
-            let resolved = fetch_service_fqdns(&client, &state, &needing_fqdn).await;
+            let resolved = fetch_service_fqdns(&client, &state, &instance_id, &needing_fqdn).await;
             for mut r in resources {
                 if r.fqdn.as_deref().map(|s| s.is_empty()).unwrap_or(true) {
                     if let Some(Some(url)) = resolved.get(&r.uuid).cloned() {
@@ -219,7 +218,7 @@ pub async fn list_resources(
     // /projects → /projects/{uuid} fan-out. Coolify's list responses for
     // Services + Databases ship only `environment_id` (int) without the
     // nested env+project UUIDs the dashboard deep-link URL needs.
-    enrich_project_env(&client, &state, &mut out).await;
+    enrich_project_env(&client, &state, &instance_id, &mut out).await;
 
     if out.is_empty() && !errors.is_empty() {
         let combined = errors
@@ -304,11 +303,16 @@ async fn build_project_env_cache(client: &CoolifyClient) -> Option<ProjectEnvCac
 
 /// Fill `project_uuid` + `environment_uuid` on each Resource whose
 /// list-response shape only carried `environment_id`. Cache TTL 5 min.
-async fn enrich_project_env(client: &CoolifyClient, state: &State<'_, AppState>, out: &mut [Resource]) {
+async fn enrich_project_env(
+    client: &CoolifyClient,
+    state: &State<'_, AppState>,
+    instance_id: &str,
+    out: &mut [Resource],
+) {
     const TTL_SECS: u64 = 300;
     let cached: Option<ProjectEnvCache> = {
         let guard = state.project_env_cache.read().await;
-        guard.as_ref().and_then(|c| {
+        guard.get(instance_id).and_then(|c| {
             if c.fetched_at.elapsed().as_secs() < TTL_SECS {
                 Some(c.clone())
             } else {
@@ -320,7 +324,11 @@ async fn enrich_project_env(client: &CoolifyClient, state: &State<'_, AppState>,
         Some(c) => c,
         None => match build_project_env_cache(client).await {
             Some(c) => {
-                *state.project_env_cache.write().await = Some(c.clone());
+                state
+                    .project_env_cache
+                    .write()
+                    .await
+                    .insert(instance_id.to_string(), c.clone());
                 c
             }
             None => return,
@@ -356,13 +364,14 @@ async fn enrich_project_env(client: &CoolifyClient, state: &State<'_, AppState>,
 /// carries on the table row (`"application" | "service" | "database"`).
 #[tauri::command]
 pub async fn get_resource_detail(
+    instance_id: String,
     uuid: String,
     kind: String,
     state: State<'_, AppState>,
 ) -> Result<ResourceDetail, String> {
     let resource_kind = ResourceKind::from_str(&kind)
         .ok_or_else(|| format!("unknown resource kind: {}", kind))?;
-    let client = clone_client(&state).await?;
+    let client = clone_client(&state, &instance_id).await?;
     let path = format!("api/v1/{}/{}", resource_kind.path_segment(), uuid);
     let raw: serde_json::Value = client.get(&path).await.map_err(|e| e.to_string())?;
     let mut detail = build_detail(raw, resource_kind);
@@ -387,7 +396,8 @@ pub async fn get_resource_detail(
         // Write back into the shared deploy_cache so list_resources's
         // next poll surfaces the SAME timestamp the user just saw.
         let mut cache = state.deploy_cache.write().await;
-        cache.insert(
+        let inst_cache = cache.entry(instance_id.clone()).or_default();
+        inst_cache.insert(
             uuid.clone(),
             super::DeployCacheEntry {
                 last_deployed_at: detail.last_deployed_at,
@@ -404,13 +414,14 @@ pub async fn get_resource_detail(
 /// enough to block detail rendering for several seconds when bundled.
 #[tauri::command]
 pub async fn get_resource_envs(
+    instance_id: String,
     uuid: String,
     kind: String,
     state: State<'_, AppState>,
 ) -> Result<Vec<EnvVar>, String> {
     let resource_kind = ResourceKind::from_str(&kind)
         .ok_or_else(|| format!("unknown resource kind: {}", kind))?;
-    let client = clone_client(&state).await?;
+    let client = clone_client(&state, &instance_id).await?;
     let envs_path = format!(
         "api/v1/{}/{}/envs",
         resource_kind.path_segment(),
@@ -478,12 +489,13 @@ fn parse_envs(v: &serde_json::Value) -> Vec<EnvVar> {
 /// but per the spec only Applications + Services route through here in v1.
 #[tauri::command]
 pub async fn restart_resource(
+    instance_id: String,
     uuid: String,
     kind: String,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
     let segment = action_segment(&kind)?;
-    let client = clone_client(&state).await?;
+    let client = clone_client(&state, &instance_id).await?;
     let path = format!("api/v1/{}/{}/restart", segment, uuid);
     client.get_raw(&path).await.map_err(|e| e.to_string())?;
     Ok(())
@@ -492,12 +504,13 @@ pub async fn restart_resource(
 /// Stop a running Resource. Mirrors `restart_resource` in transport.
 #[tauri::command]
 pub async fn stop_resource(
+    instance_id: String,
     uuid: String,
     kind: String,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
     let segment = action_segment(&kind)?;
-    let client = clone_client(&state).await?;
+    let client = clone_client(&state, &instance_id).await?;
     let path = format!("api/v1/{}/{}/stop", segment, uuid);
     client.get_raw(&path).await.map_err(|e| e.to_string())?;
     Ok(())
@@ -509,19 +522,20 @@ pub async fn stop_resource(
 /// — pulls fresh source / rebuilds the image even if nothing upstream changed.
 #[tauri::command]
 pub async fn deploy_resource(
+    instance_id: String,
     uuid: String,
     force: bool,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    let client = clone_client(&state).await?;
+    let client = clone_client(&state, &instance_id).await?;
     let path = format!("api/v1/deploy?uuid={}&force={}", uuid, force);
     client.get_raw(&path).await.map_err(|e| e.to_string())?;
     // Invalidate the per-app deploy_cache entry so the next list refresh
     // sees the new finished record once it lands, instead of returning the
-    // 5-min cached value (which would show the OLD deploy time long after
-    // the user redeployed and would diverge from the detail tab's live
-    // /deployments fetch).
-    state.deploy_cache.write().await.remove(&uuid);
+    // 5-min cached value.
+    if let Some(inst_cache) = state.deploy_cache.write().await.get_mut(&instance_id) {
+        inst_cache.remove(&uuid);
+    }
     Ok(())
 }
 
@@ -532,9 +546,10 @@ pub async fn deploy_resource(
 /// Frontend invokes via `api.debugDumpEndpoints()`.
 #[tauri::command]
 pub async fn debug_dump_endpoints(
+    instance_id: String,
     state: State<'_, AppState>,
 ) -> Result<std::collections::HashMap<String, String>, String> {
-    let client = clone_client(&state).await?;
+    let client = clone_client(&state, &instance_id).await?;
     let mut out = std::collections::HashMap::new();
     for path in ["api/v1/applications", "api/v1/services", "api/v1/databases"] {
         let result = client.get_raw(path).await;
@@ -564,6 +579,7 @@ pub async fn debug_dump_endpoints(
 /// to 500 per the locked design.
 #[tauri::command]
 pub async fn tail_logs(
+    instance_id: String,
     uuid: String,
     kind: String,
     lines: u32,
@@ -571,7 +587,7 @@ pub async fn tail_logs(
     state: State<'_, AppState>,
 ) -> Result<String, String> {
     let capped = lines.min(5000);
-    let client = clone_client(&state).await?;
+    let client = clone_client(&state, &instance_id).await?;
 
     // The Coolify v1 API only exposes a logs endpoint under
     // /applications/{uuid}/logs. Services + Databases have NO documented
@@ -619,12 +635,18 @@ pub async fn tail_logs(
 
 // ── helpers ─────────────────────────────────────────────────────────────────
 
-async fn clone_client(state: &State<'_, AppState>) -> Result<CoolifyClient, String> {
-    let guard = state.client.read().await;
+/// Clone the per-instance CoolifyClient. Every command takes an
+/// `instance_id` to route to the right Coolify server; this helper
+/// centralises the lookup + error path so the commands stay terse.
+async fn clone_client(
+    state: &State<'_, AppState>,
+    instance_id: &str,
+) -> Result<CoolifyClient, String> {
+    let guard = state.clients.read().await;
     guard
-        .as_ref()
+        .get(instance_id)
         .cloned()
-        .ok_or_else(|| "no Coolify credentials set — call set_credentials first".to_string())
+        .ok_or_else(|| format!("no Coolify client for instance {} — call set_credentials first", instance_id))
 }
 
 /// Pull the most-recent deployment timestamp per application uuid, with a
@@ -636,6 +658,7 @@ async fn clone_client(state: &State<'_, AppState>) -> Result<CoolifyClient, Stri
 async fn fetch_last_deployments(
     client: &CoolifyClient,
     state: &State<'_, AppState>,
+    instance_id: &str,
     uuids: &[String],
 ) -> std::collections::HashMap<String, Option<chrono::DateTime<chrono::Utc>>> {
     use std::time::{Duration, Instant};
@@ -653,8 +676,9 @@ async fn fetch_last_deployments(
     let mut to_fetch: Vec<String> = Vec::new();
     {
         let cache = state.deploy_cache.read().await;
+        let inst_cache = cache.get(instance_id);
         for uuid in uuids {
-            match cache.get(uuid) {
+            match inst_cache.and_then(|m| m.get(uuid)) {
                 Some(entry) if now.duration_since(entry.fetched_at) < TTL => {
                     out.insert(uuid.clone(), entry.last_deployed_at);
                 }
@@ -689,9 +713,10 @@ async fn fetch_last_deployments(
 
     // Phase 3: write back to cache + accumulate output.
     let mut cache = state.deploy_cache.write().await;
+    let inst_cache = cache.entry(instance_id.to_string()).or_default();
     let fetched_at = Instant::now();
     for (uuid, ts) in results {
-        cache.insert(
+        inst_cache.insert(
             uuid.clone(),
             super::DeployCacheEntry {
                 last_deployed_at: ts,
@@ -746,6 +771,7 @@ fn extract_last_finished_deployment_timestamp(
 async fn fetch_service_fqdns(
     client: &CoolifyClient,
     state: &State<'_, AppState>,
+    instance_id: &str,
     uuids: &[String],
 ) -> std::collections::HashMap<String, Option<String>> {
     use std::time::{Duration, Instant};
@@ -757,8 +783,9 @@ async fn fetch_service_fqdns(
     let mut to_fetch: Vec<String> = Vec::new();
     {
         let cache = state.service_fqdn_cache.read().await;
+        let inst_cache = cache.get(instance_id);
         for uuid in uuids {
-            match cache.get(uuid) {
+            match inst_cache.and_then(|m| m.get(uuid)) {
                 Some(entry) if now.duration_since(entry.fetched_at) < TTL => {
                     out.insert(uuid.clone(), entry.fqdn.clone());
                 }
@@ -788,9 +815,10 @@ async fn fetch_service_fqdns(
     let results = futures::future::join_all(futs).await;
 
     let mut cache = state.service_fqdn_cache.write().await;
+    let inst_cache = cache.entry(instance_id.to_string()).or_default();
     let fetched_at = Instant::now();
     for (uuid, fqdn) in results {
-        cache.insert(
+        inst_cache.insert(
             uuid.clone(),
             super::ServiceFqdnEntry {
                 fqdn: fqdn.clone(),

@@ -34,6 +34,7 @@ pub fn run() {
             coolify::ops::debug_dump_endpoints,
             registry::commands::check_image,
             registry::commands::read_image_cache,
+            secrets::migrate_legacy_token_cmd,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

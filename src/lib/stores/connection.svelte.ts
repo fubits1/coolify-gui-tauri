@@ -1,41 +1,28 @@
+import { SvelteMap } from "svelte/reactivity";
+
 /**
- * Connection store — drives the top-of-window status strip.
+ * Per-instance connection store. Each Coolify instance has its own
+ * state machine: `connected` ↔ `reconnecting` ↔ `offline`. The
+ * `connectionRegistry` hands out a singleton per `instanceId`; the
+ * resources poller calls `markOk()` / `markFailure()` on the entry
+ * matching the instance it's polling.
  *
- * One singleton (`connection`) shared across the app. Transitions:
- *
- * ```
- *  connected ── markFailure ──▶ reconnecting (1s) ──▶ (2,4,8,16,30,30…s)
- *      ▲              │
- *      └── markOk ────┘ (resets countdown to baseline)
- *
- *  any state ── markOffline ──▶ offline (countdown cleared)
- * ```
- *
- * The store only models presentation state — it does not schedule retries.
- * The poll loop in `resources.svelte.ts` drives the cadence; this store
- * just answers "what string + colour does the strip render?" via `state`
- * and "what countdown number do we show?" via `reconnectInSec`.
- *
- * Idiom note: class with `$state` fields + a singleton export. This avoids
- * the "can't export reassigned `$state`" caveat (see Svelte 5 docs on
- * passing state across modules) and lets methods read/write peer fields
- * without prop drilling.
+ * Top-strip UI reads the ACTIVE instance's store (`instances.active.id`)
+ * for its label; the InstanceTabStrip reads each tab's store for the
+ * status dot color.
  */
 
 type ConnectionState = "connected" | "reconnecting" | "offline";
 
-/** Exponential countdown schedule used while reconnecting (seconds). */
 const RECONNECT_SCHEDULE = [1, 2, 4, 8, 16, 30] as const;
 
-class ConnectionStore {
+export class ConnectionStore {
   state: ConnectionState = $state("connected");
   lastPingAt: number | null = $state(null);
   reconnectInSec: number | null = $state(null);
 
-  /** Index into RECONNECT_SCHEDULE for the next failure. Hidden from UI. */
   #stepIdx = 0;
 
-  /** Record a successful round-trip. Resets failure counter + countdown. */
   markOk() {
     this.state = "connected";
     this.lastPingAt = Date.now();
@@ -43,11 +30,6 @@ class ConnectionStore {
     this.#stepIdx = 0;
   }
 
-  /**
-   * Record a transient failure. Bumps the strip to `reconnecting` and
-   * advances the countdown. Repeated calls climb the schedule until the
-   * cap (30s), then plateau there.
-   */
   markFailure() {
     this.state = "reconnecting";
     const idx = Math.min(this.#stepIdx, RECONNECT_SCHEDULE.length - 1);
@@ -55,11 +37,36 @@ class ConnectionStore {
     this.#stepIdx = idx + 1;
   }
 
-  /** Hard offline (e.g. user toggled the wifi off). Stops the countdown. */
   markOffline() {
     this.state = "offline";
     this.reconnectInSec = null;
   }
 }
 
-export const connection = new ConnectionStore();
+class ConnectionRegistry {
+  #stores: SvelteMap<string, ConnectionStore> = new SvelteMap();
+
+  /** Pure read. Returns the store if it exists; null otherwise. Safe to
+   *  call from `$derived` / template expressions because it never
+   *  mutates the underlying map. */
+  get(instanceId: string): ConnectionStore | null {
+    return this.#stores.get(instanceId) ?? null;
+  }
+
+  /** Imperative: create + cache the store if missing. Call from instance
+   *  lifecycle (add, load) — NEVER from a $derived or template. */
+  ensure(instanceId: string): ConnectionStore {
+    let store = this.#stores.get(instanceId);
+    if (!store) {
+      store = new ConnectionStore();
+      this.#stores.set(instanceId, store);
+    }
+    return store;
+  }
+
+  drop(instanceId: string): void {
+    this.#stores.delete(instanceId);
+  }
+}
+
+export const connectionRegistry = new ConnectionRegistry();

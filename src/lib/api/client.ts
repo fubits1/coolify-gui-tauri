@@ -6,35 +6,58 @@ import type {
   TestConnectionResult,
 } from "./types";
 
-export interface ListResourcesResult {
+export type ListResourcesResult = {
   resources: Resource[];
   errors: Record<string, string>;
-}
+};
 
-// Thin typed wrappers around Tauri `invoke()`. Every Coolify HTTP call lives
-// Rust-side; the webview never sees the bearer token.
+/**
+ * Thin typed wrappers around Tauri `invoke()`. Every Coolify HTTP call
+ * lives Rust-side; the webview never sees the bearer token.
+ *
+ * Every per-instance call carries an `instanceId` that the Rust side
+ * uses to route to the right CoolifyClient (and the right per-instance
+ * cache). `testConnection` + `migrateLegacyToken` are the only stateless
+ * exceptions.
+ */
 export const api = {
   testConnection: (url: string, token: string) =>
     invoke<TestConnectionResult>("test_connection", { url, token }),
-  setCredentials: (url: string, token: string, alias?: string) =>
-    invoke<void>("set_credentials", { url, token, alias }),
-  loadCredentials: (url: string, alias?: string) =>
-    invoke<boolean>("load_credentials", { url, alias }),
-  clearCredentials: (alias?: string) =>
-    invoke<void>("clear_credentials", { alias }),
-  listResources: () => invoke<ListResourcesResult>("list_resources"),
-  getResourceDetail: (uuid: string, kind: string) =>
-    invoke<ResourceDetail>("get_resource_detail", { uuid, kind }),
-  getResourceEnvs: (uuid: string, kind: string) =>
-    invoke<EnvVar[]>("get_resource_envs", { uuid, kind }),
-  restart: (uuid: string, kind: string) =>
-    invoke<void>("restart_resource", { uuid, kind }),
-  stop: (uuid: string, kind: string) =>
-    invoke<void>("stop_resource", { uuid, kind }),
-  deploy: (uuid: string, force: boolean) =>
-    invoke<void>("deploy_resource", { uuid, force }),
-  tailLogs: (uuid: string, kind: string, lines = 500, container?: string) =>
-    invoke<string>("tail_logs", { uuid, kind, lines, container }),
-  debugDumpEndpoints: () =>
-    invoke<Record<string, string>>("debug_dump_endpoints"),
+  setCredentials: (instanceId: string, url: string, token: string) =>
+    invoke<void>("set_credentials", { instanceId, url, token }),
+  loadCredentials: (instanceId: string, url: string) =>
+    invoke<boolean>("load_credentials", { instanceId, url }),
+  clearCredentials: (instanceId: string) =>
+    invoke<void>("clear_credentials", { instanceId }),
+  listResources: (instanceId: string) =>
+    invoke<ListResourcesResult>("list_resources", { instanceId }),
+  getResourceDetail: (instanceId: string, uuid: string, kind: string) =>
+    invoke<ResourceDetail>("get_resource_detail", { instanceId, uuid, kind }),
+  getResourceEnvs: (instanceId: string, uuid: string, kind: string) =>
+    invoke<EnvVar[]>("get_resource_envs", { instanceId, uuid, kind }),
+  restart: (instanceId: string, uuid: string, kind: string) =>
+    invoke<void>("restart_resource", { instanceId, uuid, kind }),
+  stop: (instanceId: string, uuid: string, kind: string) =>
+    invoke<void>("stop_resource", { instanceId, uuid, kind }),
+  deploy: (instanceId: string, uuid: string, force: boolean) =>
+    invoke<void>("deploy_resource", { instanceId, uuid, force }),
+  tailLogs: (
+    instanceId: string,
+    uuid: string,
+    kind: string,
+    lines = 500,
+    container?: string,
+  ) =>
+    invoke<string>("tail_logs", { instanceId, uuid, kind, lines, container }),
+  debugDumpEndpoints: (instanceId: string) =>
+    invoke<Record<string, string>>("debug_dump_endpoints", { instanceId }),
+  /**
+   * One-shot migration helper. Reads the legacy single-tenant keyring
+   * entry (keyed by `alias`, default `"default"`) and removes it. The
+   * caller is responsible for invoking `setCredentials` with the new
+   * `instanceId` to re-save the token under the multi-instance scheme.
+   * Returns `null` if no legacy entry exists.
+   */
+  migrateLegacyToken: (alias: string) =>
+    invoke<string | null>("migrate_legacy_token_cmd", { alias }),
 };

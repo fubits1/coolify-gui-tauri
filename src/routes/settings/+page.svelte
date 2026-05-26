@@ -11,13 +11,14 @@
 	import { Button } from "$lib/components/ui/button";
 	import { Input } from "$lib/components/ui/input";
 	import { Label } from "$lib/components/ui/label";
-	import { instance } from "$lib/stores/instance.svelte";
-	import { resources } from "$lib/stores/resources.svelte";
+	import { instances } from "$lib/stores/instances.svelte";
+	import { resourcesRegistry } from "$lib/stores/resources.svelte";
 	import { api } from "$lib/api/client";
 	import { toast } from "svelte-sonner";
 
+	let editingId = $state<string | null>(null);
 	let url = $state("");
-	let token = $state(""); // empty unless user wants to rotate
+	let token = $state("");
 	let alias = $state("");
 	let pollingPaused = $state(false);
 	let dockerHubPat = $state("");
@@ -28,12 +29,21 @@
 	);
 
 	onMount(async () => {
-		try {
-			await instance.load();
-			url = instance.url ?? "";
-			alias = instance.alias ?? "";
-		} catch (err) {
-			console.error("Failed to load instance settings", err);
+		await instances.load();
+		const current = instances.active ?? instances.list[0] ?? null;
+		if (current) {
+			editingId = current.id;
+			url = current.url;
+			alias = current.alias;
+		}
+	});
+
+	$effect(() => {
+		if (!editingId) return;
+		const inst = instances.list.find((i) => i.id === editingId);
+		if (inst) {
+			url = inst.url;
+			alias = inst.alias;
 		}
 	});
 
@@ -67,12 +77,23 @@
 	}
 
 	async function saveInstance() {
+		if (!editingId) return;
 		try {
 			if (token) {
-				await api.setCredentials(url, token, alias || undefined);
+				await api.setCredentials(editingId, url, token);
 				token = "";
 			}
-			await instance.save(url, alias);
+			// Update the persisted url + alias on this instance entry.
+			const idx = instances.list.findIndex(
+				(instance) => instance.id === editingId,
+			);
+			if (idx !== -1) {
+				const next = [...instances.list];
+				const ready = next[idx].ready;
+				next[idx] = { id: editingId, url, alias, ready };
+				instances.list = next;
+				await instances.setActive(instances.activeId ?? editingId);
+			}
 			toast.success("Instance settings saved");
 		} catch (err) {
 			const message = err instanceof Error ? err.message : String(err);
@@ -81,12 +102,10 @@
 	}
 
 	async function signOut() {
+		if (!editingId) return;
 		try {
-			resources.stop();
-			await api.clearCredentials(instance.alias ?? undefined);
-			await instance.clear();
-			// Hard-reload to the root so the boot guard re-runs and ConnectScreen
-			// renders with a clean slate.
+			resourcesRegistry.drop(editingId);
+			await instances.remove(editingId);
 			window.location.assign("/");
 		} catch (err) {
 			const message = err instanceof Error ? err.message : String(err);
@@ -95,13 +114,16 @@
 	}
 
 	async function togglePolling() {
+		const active = instances.active;
+		if (!active) return;
+		const store = resourcesRegistry.ensure(active.id);
 		pollingPaused = !pollingPaused;
 		try {
 			if (pollingPaused) {
-				resources.stop();
+				store.stop();
 				toast.info("Polling paused");
 			} else {
-				await resources.start();
+				await store.start();
 				toast.info("Polling resumed");
 			}
 		} catch (err) {
@@ -143,13 +165,26 @@
 
 	<Card>
 		<CardHeader>
-			<CardTitle>Instance</CardTitle>
+			<CardTitle>Instances</CardTitle>
 			<CardDescription>
-				Coolify URL, bearer token (scope: read:sensitive + deploy), and a
-				friendly alias.
+				Edit the URL, rotate the bearer token, or remove a Coolify instance.
+				Switch the dropdown to edit a different instance.
 			</CardDescription>
 		</CardHeader>
 		<CardContent class="flex flex-col gap-4">
+			<div class="flex flex-col gap-2">
+				<Label for="instance-select">Editing</Label>
+				<select
+					id="instance-select"
+					class="h-9 rounded-md border border-input bg-background px-2 text-sm"
+					bind:value={editingId}
+				>
+					{#each instances.list as inst (inst.id)}
+						<option value={inst.id}>{inst.alias} — {inst.url}</option>
+					{/each}
+				</select>
+			</div>
+
 			<div class="flex flex-col gap-2">
 				<Label for="instance-url">URL</Label>
 				<Input
@@ -199,12 +234,8 @@
 					{testing ? "Testing…" : "Test"}
 				</Button>
 				<Button onclick={saveInstance}>Save</Button>
-				<Button
-					variant="destructive"
-					class="ml-auto"
-					onclick={signOut}
-				>
-					Sign out
+				<Button variant="destructive" class="ml-auto" onclick={signOut}>
+					Remove instance
 				</Button>
 			</div>
 		</CardContent>
@@ -214,7 +245,8 @@
 		<CardHeader>
 			<CardTitle>Polling</CardTitle>
 			<CardDescription>
-				Live resource refresh while the window is focused.
+				Live resource refresh on the ACTIVE instance while the window is
+				focused.
 			</CardDescription>
 		</CardHeader>
 		<CardContent class="flex flex-col gap-4">

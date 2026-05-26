@@ -29,8 +29,7 @@ Props:
 		TabsContent,
 	} from "$lib/components/ui/tabs";
 	import StatusBadge from "$lib/components/badges/StatusBadge.svelte";
-	import { instance } from "$lib/stores/instance.svelte";
-	import { toast } from "$lib/util/toast";
+	import { toast } from "$lib/util/toast.svelte";
 	import DeployDialog from "./DeployDialog.svelte";
 	import OverviewTab from "./tabs/OverviewTab.svelte";
 	import EnvTab from "./tabs/EnvTab.svelte";
@@ -40,9 +39,15 @@ Props:
 	import ImagesTab from "./tabs/ImagesTab.svelte";
 
 	let {
+		instanceId,
+		instanceUrl,
 		resource,
 		onClose,
 	}: {
+		/** Active Coolify instance id — routes every backend call. */
+		instanceId: string;
+		/** Active instance base URL — used to build the dashboard logs link. */
+		instanceUrl: string;
 		resource: Resource | null;
 		/** Caller-provided close handler. Renders an X button inline with
 		 *  the action buttons so it doesn't overlap with Restart/Stop/Deploy. */
@@ -94,7 +99,7 @@ Props:
 		let cancelled = false;
 		detailLoading = true;
 		api
-			.getResourceDetail(uuid, kind)
+			.getResourceDetail(instanceId, uuid, kind)
 			.then((d) => {
 				if (cancelled) return;
 				detail = d;
@@ -112,7 +117,7 @@ Props:
 		// because detail was still null → tab label said "(N)" but content
 		// rendered the empty-state).
 		api
-			.getResourceEnvs(uuid, kind)
+			.getResourceEnvs(instanceId, uuid, kind)
 			.then((next) => {
 				if (cancelled) return;
 				envs = next;
@@ -163,7 +168,7 @@ Props:
 	 *  loading detail / enrichment). The link button hides itself then.
 	 */
 	const dashboardLogsUrl = $derived.by(() => {
-		if (!resource || !instance.url) return null;
+		if (!resource || !instanceUrl) return null;
 		const projectUuid = detail?.project_uuid ?? resource.project_uuid ?? null;
 		const envSeg =
 			detail?.environment_uuid ??
@@ -172,7 +177,7 @@ Props:
 			resource.environment_name ??
 			null;
 		if (!projectUuid || !envSeg) return null;
-		const base = instance.url.replace(/\/$/, "");
+		const base = instanceUrl.replace(/\/$/, "");
 		return `${base}/project/${projectUuid}/environment/${envSeg}/${resource.kind.toLowerCase()}/${resource.uuid}/logs`;
 	});
 
@@ -192,7 +197,7 @@ Props:
 	async function handleRestart() {
 		if (!resource) return;
 		try {
-			await api.restart(resource.uuid, resource.kind);
+			await api.restart(instanceId, resource.uuid, resource.kind);
 			toast.success("Restart triggered");
 		} catch (err) {
 			toast.error(
@@ -205,7 +210,7 @@ Props:
 	async function handleStop() {
 		if (!resource) return;
 		try {
-			await api.stop(resource.uuid, resource.kind);
+			await api.stop(instanceId, resource.uuid, resource.kind);
 			toast.success("Stop triggered");
 		} catch (err) {
 			toast.error(
@@ -219,7 +224,7 @@ Props:
 		deployOpen = false;
 		if (!resource) return;
 		try {
-			await api.deploy(resource.uuid, force);
+			await api.deploy(instanceId, resource.uuid, force);
 			toast.success(force ? "Deploy (force) triggered" : "Deploy triggered");
 		} catch (err) {
 			toast.error(

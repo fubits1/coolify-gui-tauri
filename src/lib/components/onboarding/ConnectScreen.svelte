@@ -17,10 +17,19 @@ Props:
 	import { Input } from "$lib/components/ui/input";
 	import { Label } from "$lib/components/ui/label";
 	import { api } from "$lib/api/client";
-	import { instance } from "$lib/stores/instance.svelte";
-	import { toast } from "$lib/util/toast";
+	import { instances } from "$lib/stores/instances.svelte";
+	import { toast } from "$lib/util/toast.svelte";
 
-	let { onConnected }: { onConnected: (url: string, alias: string) => void } = $props();
+	let {
+		onConnected,
+		embed = false,
+	}: {
+		/** Called with the newly-added instance id once it's persisted. */
+		onConnected: (id: string) => void;
+		/** When true, renders inline (no full-screen wrapper) for the
+		 *  "+ add instance" flow inside the multi-instance shell. */
+		embed?: boolean;
+	} = $props();
 
 	let url = $state("");
 	let token = $state("");
@@ -58,10 +67,9 @@ Props:
 		saving = true;
 		try {
 			const aliasValue = alias.trim() || new URL(url.trim()).host;
-			await api.setCredentials(url.trim(), token.trim(), aliasValue);
-			await instance.save(url.trim(), aliasValue);
+			const added = await instances.add(url.trim(), token.trim(), aliasValue);
 			toast.success(`Connected to ${tested.team ?? aliasValue}`);
-			onConnected(url.trim(), aliasValue);
+			onConnected(added.id);
 		} catch (err) {
 			const msg = err instanceof Error ? err.message : String(err);
 			toast.error("Failed to save credentials", msg);
@@ -76,8 +84,12 @@ Props:
 	}
 </script>
 
-<div class="flex min-h-screen items-center justify-center bg-background p-6">
-	<Card class="w-full max-w-md">
+<div
+	class={embed
+		? "p-4"
+		: "flex min-h-screen items-center justify-center bg-background p-6"}
+>
+	<Card class={embed ? "w-full" : "w-full max-w-md"}>
 		<CardHeader>
 			<CardTitle>Connect to Coolify</CardTitle>
 			<CardDescription>

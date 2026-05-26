@@ -51,22 +51,24 @@ pub struct ProjectEnvCache {
     pub fetched_at: Instant,
 }
 
-/// Tauri-managed application state holding the active Coolify HTTP client
-/// and the per-app last-deployment cache.
+/// Tauri-managed application state. EVERY field is keyed by
+/// `instance_id` (an opaque UUID generated client-side at instance-add
+/// time). Today's single-tenant app becomes a degenerate one-entry case;
+/// multi-instance simply populates more entries.
 pub struct AppState {
-    pub client: RwLock<Option<CoolifyClient>>,
-    pub deploy_cache: RwLock<HashMap<String, DeployCacheEntry>>,
-    pub service_fqdn_cache: RwLock<HashMap<String, ServiceFqdnEntry>>,
-    pub project_env_cache: RwLock<Option<ProjectEnvCache>>,
+    pub clients: RwLock<HashMap<String, CoolifyClient>>,
+    pub deploy_cache: RwLock<HashMap<String, HashMap<String, DeployCacheEntry>>>,
+    pub service_fqdn_cache: RwLock<HashMap<String, HashMap<String, ServiceFqdnEntry>>>,
+    pub project_env_cache: RwLock<HashMap<String, ProjectEnvCache>>,
 }
 
 impl AppState {
     pub fn new() -> Self {
         Self {
-            client: RwLock::new(None),
+            clients: RwLock::new(HashMap::new()),
             deploy_cache: RwLock::new(HashMap::new()),
             service_fqdn_cache: RwLock::new(HashMap::new()),
-            project_env_cache: RwLock::new(None),
+            project_env_cache: RwLock::new(HashMap::new()),
         }
     }
 }

@@ -44,18 +44,25 @@ Props: identical to `TableView` (see that component for full prop docs).
 		onCheckImages: () => void;
 	} = $props();
 
-	function imageBadgeFor(refs: string[]): {
+	function imageBadgeFor(
+		refs: string[],
+		lastDeployedAt?: string | null,
+	): {
 		stale: number;
+		unknown: number;
 		total: number;
 		checkedAt: number | null;
 	} {
 		if (!refs || refs.length === 0) {
-			return { stale: 0, total: 0, checkedAt: null };
+			return { stale: 0, unknown: 0, total: 0, checkedAt: null };
 		}
 		let stale = 0;
+		let unknown = 0;
 		let earliest: number | null = null;
 		for (const ref of refs) {
-			if (imageCache.isStale(ref) === "newer-available") stale += 1;
+			const state = imageCache.isStale(ref, lastDeployedAt);
+			if (state === "newer-available") stale += 1;
+			else if (state === "unknown") unknown += 1;
 			const entry = imageCache.entries[ref];
 			if (entry) {
 				earliest =
@@ -64,7 +71,7 @@ Props: identical to `TableView` (see that component for full prop docs).
 						: Math.min(earliest, entry.checked_at);
 			}
 		}
-		return { stale, total: refs.length, checkedAt: earliest };
+		return { stale, unknown, total: refs.length, checkedAt: earliest };
 	}
 </script>
 
@@ -93,10 +100,11 @@ Props: identical to `TableView` (see that component for full prop docs).
 					<div class="truncate text-foreground">
 						{r.fqdn ?? r.image_ref ?? "—"}
 					</div>
-					{@const badge = imageBadgeFor(r.image_refs ?? [])}
+					{@const badge = imageBadgeFor(r.image_refs ?? [], r.last_deployed_at)}
 					<div class="flex items-center gap-2 text-xs">
 						<ImageBadge
 							stale={badge.stale}
+							unknown={badge.unknown}
 							total={badge.total}
 							checkedAt={badge.checkedAt}
 						/>

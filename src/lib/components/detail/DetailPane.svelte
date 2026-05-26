@@ -305,6 +305,9 @@ Props:
 					active={activeTab === "logs"}
 					containers={detail?.service_containers ?? []}
 					instanceUrl={instance.url}
+					projectUuid={detail?.project_uuid ?? resource.project_uuid ?? null}
+					environmentUuid={detail?.environment_uuid ?? resource.environment_uuid ?? null}
+					environmentName={detail?.environment_name ?? resource.environment_name ?? null}
 				/>
 			</TabsContent>
 
@@ -313,6 +316,7 @@ Props:
 					<ImagesTab
 						dockerComposeRaw={detail?.docker_compose_raw ?? undefined}
 						imageRef={resource.image_ref ?? undefined}
+						lastDeployedAt={resource.last_deployed_at ?? null}
 					/>
 				</TabsContent>
 			{/if}

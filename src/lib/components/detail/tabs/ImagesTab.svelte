@@ -27,9 +27,13 @@ Props:
   let {
     dockerComposeRaw,
     imageRef,
+    lastDeployedAt = null,
   }: {
     dockerComposeRaw?: string;
     imageRef?: string;
+    /** Resource's last-deploy timestamp; lets isStale do publish-time
+     *  drift checks for `:latest` tags. */
+    lastDeployedAt?: string | null;
   } = $props();
 
   /**
@@ -53,10 +57,10 @@ Props:
   });
 
   const staleCount = $derived(
-    rows.filter((r) => imageCache.isStale(r.ref) === "newer-available").length,
+    rows.filter((r) => imageCache.isStale(r.ref, lastDeployedAt) === "newer-available").length,
   );
   const unknownCount = $derived(
-    rows.filter((r) => imageCache.isStale(r.ref) === "unknown").length,
+    rows.filter((r) => imageCache.isStale(r.ref, lastDeployedAt) === "unknown").length,
   );
   const freshCount = $derived(rows.length - staleCount - unknownCount);
 
@@ -85,10 +89,10 @@ Props:
       case "unknown":
         if (tag === "latest") {
           return {
-            label: "drift unknown (:latest)",
-            class: "bg-amber-600/20 text-amber-400 border-amber-600/30",
+            label: "unchecked (:latest)",
+            class: "",
             title:
-              "Image pinned to :latest. Coolify doesn't expose the running container's digest, so we can't tell whether the live container matches the registry's current :latest. Re-deploy to be certain.",
+              "Image pinned to :latest. Click Check now — we'll compare the registry's :latest publish time against this resource's last deploy.",
           };
         }
         return { label: "unchecked", class: "" };
@@ -136,7 +140,7 @@ Props:
     <div class="flex flex-col gap-2">
       {#each rows as row (row.ref)}
         {@const entry = imageCache.entries[row.ref]}
-        {@const state = imageCache.isStale(row.ref)}
+        {@const state = imageCache.isStale(row.ref, lastDeployedAt)}
         {@const view = badgeFor(state, row.tag)}
         {@const isChecking = imageCache.checking.has(row.ref)}
         {@const latestTag =

@@ -17,7 +17,9 @@ export interface Resource {
   kind: ResourceKind;
   project_uuid?: string;
   project_name?: string;
+  environment_uuid?: string;
   environment_name?: string;
+  environment_id?: number;
   status: ResourceStatus;
   fqdn?: string;
   /** Primary image:tag (single-image resources). */

@@ -3,7 +3,19 @@
 > **MANDATORY for every agent + main thread:**
 >
 > - **`/nogrep`** — use Read/Glob/fff/Grep tools. NEVER Bash `cat/grep/find/head/tail/sed/awk/wc/ls -R`. Bash is only for `cargo`, `pnpm`, `dex`, `jq`, `gh`, `mkdir`, `cp`, `git mv`, `which`.
-> - **`/dex`** — track every task via dex.
+> - **`/dex`** — track every task via dex. **NEW /dex requests = QUEUE them with `dex create`. Do NOT context-switch to them mid-flight. Finish the in-progress fix first, then dequeue.**
+> - **`/playwright`** — VERIFY EVERY VISIBLE CHANGE in the browser yourself. "It compiles" ≠ "it works".
+>
+>   **Dev server commands** (the SvelteKit frontend serves at **<http://localhost:1420/>**):
+>
+>   | Command | What runs | When to use |
+>   |---|---|---|
+>   | `pnpm tauri dev` | Vite (1420) + Rust backend + native webview | Full app — Tauri IPC works, real Coolify API calls, secrets via keyring. Required for any test that depends on backend data. |
+>   | `pnpm dev` | Vite (1420) only — no Rust, no IPC | Pure-frontend visual smoke test. `invoke()` calls fail; stores stay empty. Use only when verifying static layout, routing, CSS, keybinds, or pure-UI logic. |
+>
+>   The user is expected to keep `pnpm tauri dev` running while you work. If `<http://localhost:1420/>` refuses connection, ASK the user to start it — do NOT spawn `pnpm tauri dev` in the background yourself (it opens a native window and grabs focus). `pnpm dev` is safe to background for frontend-only smoke tests.
+>
+>   Flow: `mcp__playwright__browser_navigate http://localhost:1420/` → `browser_snapshot` → confirm the change rendered. Then `browser_take_screenshot` for the user to eyeball when needed.
 >
 > Skipping either rule wastes the user's time on permission prompts.
 >

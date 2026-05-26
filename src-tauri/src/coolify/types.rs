@@ -73,7 +73,13 @@ pub struct Resource {
     pub kind: ResourceKind,
     pub project_uuid: Option<String>,
     pub project_name: Option<String>,
+    pub environment_uuid: Option<String>,
     pub environment_name: Option<String>,
+    /// Coolify's integer environment id. Often the ONLY env signal in
+    /// list responses for Services + Databases (which don't always nest
+    /// `environment.uuid`). `ops::list_resources` uses this to look up
+    /// the matching env_uuid + project_uuid via /projects.
+    pub environment_id: Option<i64>,
     pub status: ResourceStatus,
     pub fqdn: Option<String>,
     /// Primary image reference for single-image Resources (databases, apps
@@ -142,7 +148,9 @@ pub struct ResourceDetail {
     pub kind: ResourceKind,
     pub project_uuid: Option<String>,
     pub project_name: Option<String>,
+    pub environment_uuid: Option<String>,
     pub environment_name: Option<String>,
+    pub environment_id: Option<i64>,
     pub status: ResourceStatus,
     pub fqdn: Option<String>,
     pub image_ref: Option<String>,
@@ -222,6 +230,7 @@ pub(crate) struct RawApplication {
     /// value is `"deploy"`, `last_restart_at` is effectively the last
     /// deployment timestamp — saves a per-app /deployments lookup.
     pub last_restart_type: Option<String>,
+    pub environment_id: Option<i64>,
     pub environment: Option<RawEnvironment>,
     pub destination: Option<RawDestination>,
 }
@@ -236,6 +245,7 @@ pub(crate) struct RawService {
     pub docker_compose_raw: Option<String>,
     pub last_online_at: Option<String>,
     pub updated_at: Option<String>,
+    pub environment_id: Option<i64>,
     pub environment: Option<RawEnvironment>,
     pub destination: Option<RawDestination>,
     /// Coolify nests per-container FQDNs here when the service composes
@@ -274,12 +284,14 @@ pub(crate) struct RawDatabase {
     pub image: Option<String>,
     pub last_online_at: Option<String>,
     pub updated_at: Option<String>,
+    pub environment_id: Option<i64>,
     pub environment: Option<RawEnvironment>,
     pub destination: Option<RawDestination>,
 }
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct RawEnvironment {
+    pub uuid: Option<String>,
     pub name: Option<String>,
     pub project: Option<RawProject>,
 }
@@ -346,7 +358,8 @@ fn pick_last_deployed(
 
 impl RawApplication {
     pub(crate) fn into_resource(self) -> Resource {
-        let (project_uuid, project_name, environment_name) = unpack_environment(self.environment);
+        let (project_uuid, project_name, environment_uuid, environment_name) =
+            unpack_environment(self.environment);
         let status = parse_status(self.status.as_deref().unwrap_or(""));
         // last_online_at is the heartbeat (constantly refreshed for running
         // containers). updated_at gets bumped on status reconciliation,
@@ -389,7 +402,9 @@ impl RawApplication {
             kind: ResourceKind::Application,
             project_uuid,
             project_name,
+            environment_uuid,
             environment_name,
+            environment_id: self.environment_id,
             status,
             fqdn: self.fqdn,
             image_ref: single_image,
@@ -406,7 +421,8 @@ impl RawApplication {
 
 impl RawService {
     pub(crate) fn into_resource(self) -> Resource {
-        let (project_uuid, project_name, environment_name) = unpack_environment(self.environment);
+        let (project_uuid, project_name, environment_uuid, environment_name) =
+            unpack_environment(self.environment);
         let status = parse_status(self.status.as_deref().unwrap_or(""));
         let last_deployed_at = pick_last_deployed(self.last_online_at, self.updated_at);
         // Coolify's GET /services list does NOT surface FQDN at top-level for
@@ -441,7 +457,9 @@ impl RawService {
             kind: ResourceKind::Service,
             project_uuid,
             project_name,
+            environment_uuid,
             environment_name,
+            environment_id: self.environment_id,
             status,
             fqdn,
             image_ref: None,
@@ -630,7 +648,8 @@ fn is_loopback_url(url: &str) -> bool {
 
 impl RawDatabase {
     pub(crate) fn into_resource(self) -> Resource {
-        let (project_uuid, project_name, environment_name) = unpack_environment(self.environment);
+        let (project_uuid, project_name, environment_uuid, environment_name) =
+            unpack_environment(self.environment);
         let status = parse_status(self.status.as_deref().unwrap_or(""));
         let last_deployed_at = pick_last_deployed(self.last_online_at, self.updated_at);
         let image = self.image.clone();
@@ -645,7 +664,9 @@ impl RawDatabase {
             kind: ResourceKind::Database,
             project_uuid,
             project_name,
+            environment_uuid,
             environment_name,
+            environment_id: self.environment_id,
             status,
             fqdn: None,
             image_ref: image,
@@ -657,16 +678,19 @@ impl RawDatabase {
     }
 }
 
-fn unpack_environment(env: Option<RawEnvironment>) -> (Option<String>, Option<String>, Option<String>) {
+fn unpack_environment(
+    env: Option<RawEnvironment>,
+) -> (Option<String>, Option<String>, Option<String>, Option<String>) {
     let Some(e) = env else {
-        return (None, None, None);
+        return (None, None, None, None);
     };
+    let env_uuid = e.uuid;
     let env_name = e.name;
     let (project_uuid, project_name) = match e.project {
         Some(p) => (p.uuid, p.name),
         None => (None, None),
     };
-    (project_uuid, project_name, env_name)
+    (project_uuid, project_name, env_uuid, env_name)
 }
 
 impl RawEnvVar {

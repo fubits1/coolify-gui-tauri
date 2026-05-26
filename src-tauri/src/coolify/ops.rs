@@ -1,12 +1,15 @@
 use serde::Serialize;
 use tauri::State;
 
+use std::collections::HashMap;
+use std::time::Instant;
+
 use super::client::CoolifyClient;
 use super::types::{
     parse_status, EnvVar, HealthCheck, RawApplication, RawDatabase, RawEnvVar, RawService,
     Resource, ResourceDetail, ResourceKind,
 };
-use super::AppState;
+use super::{AppState, ProjectEnvCache, ProjectEnvLookup};
 
 /// Result of an onboarding "Test connection" probe.
 ///
@@ -212,6 +215,12 @@ pub async fn list_resources(
         }
     }
 
+    // Enrich resources with project_uuid + environment_uuid via the
+    // /projects → /projects/{uuid} fan-out. Coolify's list responses for
+    // Services + Databases ship only `environment_id` (int) without the
+    // nested env+project UUIDs the dashboard deep-link URL needs.
+    enrich_project_env(&client, &state, &mut out).await;
+
     if out.is_empty() && !errors.is_empty() {
         let combined = errors
             .iter()
@@ -224,6 +233,121 @@ pub async fn list_resources(
         resources: out,
         errors,
     })
+}
+
+/// Build (and cache, 5 min) a `environment_id → (project_uuid, env_uuid, …)`
+/// map by fanning out `/projects` then `/projects/{uuid}` per project.
+///
+/// Used to fill `project_uuid` + `environment_uuid` on Resources whose
+/// list response stripped the nested `environment.project` object (common
+/// for Services + Databases). Cached aggressively because projects +
+/// environments rarely change.
+async fn build_project_env_cache(client: &CoolifyClient) -> Option<ProjectEnvCache> {
+    let projects: Vec<serde_json::Value> = match client.get("api/v1/projects").await {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!("project_env_cache: /projects failed: {}", e);
+            return None;
+        }
+    };
+    let mut by_env_id: HashMap<i64, ProjectEnvLookup> = HashMap::new();
+    for proj in projects {
+        let proj_uuid = match proj.get("uuid").and_then(|v| v.as_str()) {
+            Some(s) => s.to_string(),
+            None => continue,
+        };
+        let proj_name = proj
+            .get("name")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let path = format!("api/v1/projects/{}", proj_uuid);
+        let detail: serde_json::Value = match client.get(&path).await {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!("project_env_cache: {} failed: {}", path, e);
+                continue;
+            }
+        };
+        let envs = match detail.get("environments").and_then(|v| v.as_array()) {
+            Some(a) => a,
+            None => continue,
+        };
+        for env in envs {
+            let env_id = match env.get("id").and_then(|v| v.as_i64()) {
+                Some(n) => n,
+                None => continue,
+            };
+            let env_uuid = match env.get("uuid").and_then(|v| v.as_str()) {
+                Some(s) => s.to_string(),
+                None => continue,
+            };
+            let env_name = env
+                .get("name")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            by_env_id.insert(
+                env_id,
+                ProjectEnvLookup {
+                    project_uuid: proj_uuid.clone(),
+                    project_name: proj_name.clone(),
+                    environment_uuid: env_uuid,
+                    environment_name: env_name,
+                },
+            );
+        }
+    }
+    Some(ProjectEnvCache {
+        by_env_id,
+        fetched_at: Instant::now(),
+    })
+}
+
+/// Fill `project_uuid` + `environment_uuid` on each Resource whose
+/// list-response shape only carried `environment_id`. Cache TTL 5 min.
+async fn enrich_project_env(client: &CoolifyClient, state: &State<'_, AppState>, out: &mut [Resource]) {
+    const TTL_SECS: u64 = 300;
+    let cached: Option<ProjectEnvCache> = {
+        let guard = state.project_env_cache.read().await;
+        guard.as_ref().and_then(|c| {
+            if c.fetched_at.elapsed().as_secs() < TTL_SECS {
+                Some(c.clone())
+            } else {
+                None
+            }
+        })
+    };
+    let cache = match cached {
+        Some(c) => c,
+        None => match build_project_env_cache(client).await {
+            Some(c) => {
+                *state.project_env_cache.write().await = Some(c.clone());
+                c
+            }
+            None => return,
+        },
+    };
+    for r in out.iter_mut() {
+        let env_id = match r.environment_id {
+            Some(id) => id,
+            None => continue,
+        };
+        let lookup = match cache.by_env_id.get(&env_id) {
+            Some(l) => l,
+            None => continue,
+        };
+        if r.project_uuid.is_none() {
+            r.project_uuid = Some(lookup.project_uuid.clone());
+        }
+        if r.project_name.is_none() {
+            r.project_name = lookup.project_name.clone();
+        }
+        if r.environment_uuid.is_none() {
+            r.environment_uuid = Some(lookup.environment_uuid.clone());
+        }
+        if r.environment_name.is_none() {
+            r.environment_name = lookup.environment_name.clone();
+        }
+    }
 }
 
 /// Fetch one Resource by `{kind, uuid}` and expand its detail fields.
@@ -784,6 +908,11 @@ fn build_detail(raw: serde_json::Value, kind: ResourceKind) -> ResourceDetail {
         .and_then(|e| e.get("name"))
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
+    let environment_uuid = env_obj
+        .and_then(|e| e.get("uuid"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let environment_id = raw.get("environment_id").and_then(|v| v.as_i64());
     let project_uuid = env_obj
         .and_then(|e| e.get("project"))
         .and_then(|p| p.get("uuid"))
@@ -865,7 +994,9 @@ fn build_detail(raw: serde_json::Value, kind: ResourceKind) -> ResourceDetail {
         kind,
         project_uuid,
         project_name,
+        environment_uuid,
         environment_name,
+        environment_id,
         status,
         fqdn,
         image_ref,

@@ -25,6 +25,9 @@ Props:
 		active = true,
 		containers = [],
 		instanceUrl = null,
+		projectUuid = null,
+		environmentUuid = null,
+		environmentName = null,
 	}: {
 		uuid: string;
 		kind: string;
@@ -33,9 +36,11 @@ Props:
 		 *  Coolify v1 API has no per-container logs endpoint, so we just
 		 *  surface a clear empty-state for services. */
 		containers?: ServiceContainer[];
-		/** Used to build a deep-link to the Coolify dashboard's resource
-		 *  page when our own logs endpoint isn't available. */
+		/** Used to build the dashboard deep-link below. */
 		instanceUrl?: string | null;
+		projectUuid?: string | null;
+		environmentUuid?: string | null;
+		environmentName?: string | null;
 	} = $props();
 
 	// Logs feature is intentionally disabled in v1. Even for Applications,
@@ -46,18 +51,20 @@ Props:
 	const isLogsSupported = false;
 
 	/**
-	 * Build a Coolify dashboard URL. Coolify uses Livewire-driven SPA
-	 * routing where the URL bar may not change even when navigating into
-	 * a resource (verified against cf.fubits.dev — clicking into a
-	 * resource leaves the browser URL on the instance root). So a true
-	 * deep-link isn't possible without `project_uuid` + `environment_name`
-	 * which list endpoints don't ship.
-	 *
-	 * Best effort: open the instance root. The user navigates manually.
+	 * Coolify dashboard route — verified against cf.fubits.dev:
+	 *   {instance}/project/{project_uuid}/environment/{env_uuid_or_name}/{kind_singular}/{uuid}/logs
+	 * The env segment accepts either the UUID or the name (the API mirrors
+	 * this via /projects/{uuid}/{environment_name_or_uuid}). Prefer UUID
+	 * when present so URLs survive env renames.
 	 */
 	const dashboardUrl = $derived.by(() => {
 		if (!instanceUrl) return null;
-		return instanceUrl.replace(/\/$/, "");
+		const base = instanceUrl.replace(/\/$/, "");
+		if (!projectUuid) return base;
+		const envSeg = environmentUuid ?? environmentName;
+		if (!envSeg) return base;
+		const kindSeg = kind.toLowerCase();
+		return `${base}/project/${projectUuid}/environment/${envSeg}/${kindSeg}/${uuid}/logs`;
 	});
 
 
@@ -241,9 +248,7 @@ Props:
 					Open Coolify dashboard ↗
 				</a>
 				<span class="text-[0.65rem] text-muted-foreground">
-					Coolify's dashboard uses Livewire SPA routing — no
-					per-resource deep-link is possible. Navigate to this
-					resource manually.
+					Opens the resource's Logs view in your Coolify dashboard.
 				</span>
 			</div>
 		{/if}

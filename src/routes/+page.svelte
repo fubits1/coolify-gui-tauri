@@ -176,6 +176,7 @@
 				? () => void imageCache.checkMany([selected.image_ref as string])
 				: undefined,
 			onLogs: undefined, // future: switch DetailPane to Logs tab
+			onEscape: selected ? () => resources.select(null) : undefined,
 		});
 		return cleanup;
 	});

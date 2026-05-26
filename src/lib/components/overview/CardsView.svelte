@@ -61,7 +61,7 @@ Props: identical to `TableView` (see that component for full prop docs).
 		let earliest: number | null = null;
 		for (const ref of refs) {
 			const state = imageCache.isStale(ref, lastDeployedAt);
-			if (state === "newer-available") stale += 1;
+			if (state === "newer-digest" || state === "newer-tag") stale += 1;
 			else if (state === "unknown") unknown += 1;
 			const entry = imageCache.entries[ref];
 			if (entry) {

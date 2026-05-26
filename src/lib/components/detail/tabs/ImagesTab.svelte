@@ -57,7 +57,10 @@ Props:
   });
 
   const staleCount = $derived(
-    rows.filter((r) => imageCache.isStale(r.ref, lastDeployedAt) === "newer-available").length,
+    rows.filter((r) => {
+      const s = imageCache.isStale(r.ref, lastDeployedAt);
+      return s === "newer-digest" || s === "newer-tag";
+    }).length,
   );
   const unknownCount = $derived(
     rows.filter((r) => imageCache.isStale(r.ref, lastDeployedAt) === "unknown").length,
@@ -74,6 +77,7 @@ Props:
   function badgeFor(
     state: StaleState,
     tag: string,
+    highestSemverTag: string | undefined,
   ): { label: string; class: string; title?: string } {
     switch (state) {
       case "fresh":
@@ -81,10 +85,21 @@ Props:
           label: "fresh",
           class: "bg-green-600/20 text-green-400 border-green-600/30",
         };
-      case "newer-available":
+      case "newer-digest":
         return {
-          label: "newer available",
+          label: "newer digest",
           class: "bg-amber-600/20 text-amber-400 border-amber-600/30",
+          title:
+            "Current image digest differs from the registry's latest digest — registry has published a different image since this resource was last deployed.",
+        };
+      case "newer-tag":
+        return {
+          label: highestSemverTag
+            ? `newer tag: ${highestSemverTag}`
+            : "newer tag available",
+          class: "bg-amber-600/20 text-amber-400 border-amber-600/30",
+          title:
+            "Registry has a higher semver-named tag than the one this resource is pinned to. (Current container digest is unknown, so we can only compare tag names.)",
         };
       case "unknown":
         if (tag === "latest") {
@@ -141,7 +156,7 @@ Props:
       {#each rows as row (row.ref)}
         {@const entry = imageCache.entries[row.ref]}
         {@const state = imageCache.isStale(row.ref, lastDeployedAt)}
-        {@const view = badgeFor(state, row.tag)}
+        {@const view = badgeFor(state, row.tag, entry?.highest_semver_tag)}
         {@const isChecking = imageCache.checking.has(row.ref)}
         {@const latestTag =
           entry?.highest_semver_tag && entry.highest_semver_tag !== row.tag

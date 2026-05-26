@@ -23,6 +23,7 @@ Props:
 	const isCommandBased = $derived(
 		buildPack === "nixpacks" || buildPack === "railpack" || buildPack === "static",
 	);
+	const isDockerImage = $derived(buildPack === "dockerimage");
 
 	function nonEmpty(s: string | null | undefined): string | null {
 		if (s == null) return null;
@@ -117,6 +118,17 @@ Props:
 				No Dockerfile contents stored.
 			</div>
 		{/if}
+	{:else if isDockerImage}
+		<Card>
+			<CardContent class="grid grid-cols-[8rem_1fr] gap-y-1 gap-x-3 p-4 text-xs">
+				<span class="text-muted-foreground">Image</span>
+				<span class="font-mono break-all">{detail.image_ref ?? "—"}</span>
+			</CardContent>
+		</Card>
+		<div class="rounded-md border border-dashed border-border px-4 py-3 text-xs text-muted-foreground">
+			This Application is deployed directly from a registry image. The
+			Images tab shows whether a newer push is available.
+		</div>
 	{:else if isCommandBased}
 		{#if commands.length > 0}
 			<Card>

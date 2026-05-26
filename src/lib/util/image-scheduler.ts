@@ -1,5 +1,5 @@
 import type { Resource } from "$lib/api/types";
-import { imageCache } from "$lib/stores/image-cache.svelte";
+import { imageCache, isNewerState } from "$lib/stores/image-cache.svelte";
 import { toast } from "$lib/util/toast";
 
 /**
@@ -33,7 +33,7 @@ export async function runStartupCheck(resources: Resource[]): Promise<void> {
 
   await imageCache.load();
 
-  const refs = await collectImageRefs(resources);
+  const { refs, deployTimes } = collectImageRefs(resources);
   if (refs.length === 0) return;
 
   const now = Date.now();
@@ -43,7 +43,8 @@ export async function runStartupCheck(resources: Resource[]): Promise<void> {
     // Legacy entries without an upstream reference are useless — force a
     // re-check regardless of `checked_at` age. `isStale` returns "unknown"
     // for that case.
-    if (imageCache.isStale(ref) === "unknown") return true;
+    if (imageCache.isStale(ref, deployTimes.get(ref) ?? null) === "unknown")
+      return true;
     return now - entry.checked_at > DAY_MS;
   });
 
@@ -60,8 +61,8 @@ export async function runStartupCheck(resources: Resource[]): Promise<void> {
   // Count newer-available ACROSS ALL refs (not just freshly-checked ones).
   // The previous version missed older cache entries that were < 24h old
   // and skipped this cycle but already classified as stale.
-  const newer = refs.filter(
-    (ref) => imageCache.isStale(ref) === "newer-available",
+  const newer = refs.filter((ref) =>
+    isNewerState(imageCache.isStale(ref, deployTimes.get(ref) ?? null)),
   ).length;
   if (newer > 0) {
     toast.warning(
@@ -78,15 +79,25 @@ export async function runStartupCheck(resources: Resource[]): Promise<void> {
  * Pull every image ref out of `resources[*].image_refs` — the backend now
  * populates this for us via compose-scrape + single-image-name+tag, so no
  * per-resource detail fetch is needed. De-duplicate before returning.
+ *
+ * Also returns a `ref → last_deployed_at` map so `:latest` drift checks
+ * can use the owning resource's deploy timestamp. First-resource-wins on
+ * collisions (same image deployed by two resources).
  */
-async function collectImageRefs(resources: Resource[]): Promise<string[]> {
+function collectImageRefs(resources: Resource[]): {
+  refs: string[];
+  deployTimes: Map<string, string | null>;
+} {
   const out = new Set<string>();
+  const deployTimes = new Map<string, string | null>();
   for (const r of resources) {
     for (const ref of r.image_refs ?? []) {
-      if (ref && ref.trim().length > 0) {
-        out.add(ref);
+      if (!ref || ref.trim().length === 0) continue;
+      out.add(ref);
+      if (!deployTimes.has(ref)) {
+        deployTimes.set(ref, r.last_deployed_at ?? null);
       }
     }
   }
-  return [...out];
+  return { refs: [...out], deployTimes };
 }

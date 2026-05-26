@@ -365,16 +365,6 @@ pub async fn get_resource_detail(
     let client = clone_client(&state).await?;
     let path = format!("api/v1/{}/{}", resource_kind.path_segment(), uuid);
     let raw: serde_json::Value = client.get(&path).await.map_err(|e| e.to_string())?;
-    // Diagnostic: dump environment-related fields so we can locate
-    // project_uuid + environment_uuid for the dashboard deep-link URL.
-    tracing::warn!(
-        "DIAG detail {}/{} environment_id={:?} environment={:?} project={:?}",
-        kind,
-        uuid,
-        raw.get("environment_id"),
-        raw.get("environment"),
-        raw.get("project"),
-    );
     Ok(build_detail(raw, resource_kind))
 }
 
@@ -647,10 +637,13 @@ async fn fetch_last_deployments(
         let client = client.clone();
         let uuid = uuid.clone();
         futs.push(async move {
-            let path = format!("api/v1/deployments/applications/{}?take=1", uuid);
+            // take=10: the most recent record may be queued/in_progress/failed,
+            // none of which mean "this is the version actually running". Fetch
+            // a small window and pick the most recent FINISHED deployment.
+            let path = format!("api/v1/deployments/applications/{}?take=10", uuid);
             let res: Result<serde_json::Value, _> = client.get(&path).await;
             let ts = match res {
-                Ok(v) => extract_first_deployment_timestamp(&v),
+                Ok(v) => extract_last_finished_deployment_timestamp(&v),
                 Err(e) => {
                     tracing::warn!("last_deploy fetch failed for {}: {}", uuid, e);
                     None
@@ -677,20 +670,37 @@ async fn fetch_last_deployments(
     out
 }
 
-/// `/deployments/applications/{uuid}?take=1` returns either an array or an
-/// object with a `data` key; both shapes have at most one deployment record
-/// when `take=1`. Extract `created_at` and parse with the same loose
-/// datetime parser used elsewhere (RFC 3339 or MySQL `YYYY-MM-DD HH:MM:SS`).
-fn extract_first_deployment_timestamp(
+/// Scan a `/deployments/applications/{uuid}` response and return the
+/// `created_at` of the most recent deployment whose `status` is
+/// `"finished"`. Skips `queued`, `in_progress`, `failed`, and
+/// `cancelled-by-user` records — none of those reflect "the version
+/// currently running". Returns None when no finished record is in the
+/// window (e.g. app never successfully deployed, or all returned records
+/// are queued/in-progress).
+///
+/// Accepts either a bare JSON array OR `{data: [...]}` wrapper shape.
+/// Records are assumed to be returned newest-first (Coolify's default
+/// ordering); we still walk linearly to be defensive.
+fn extract_last_finished_deployment_timestamp(
     v: &serde_json::Value,
 ) -> Option<chrono::DateTime<chrono::Utc>> {
-    let first = v
+    let arr = v
         .as_array()
-        .and_then(|a| a.first())
-        .or_else(|| v.get("data").and_then(|d| d.as_array()).and_then(|a| a.first()))
-        .or_else(|| if v.is_object() { Some(v) } else { None })?;
-    let raw = first.get("created_at").and_then(|x| x.as_str())?;
-    parse_loose_datetime(raw)
+        .or_else(|| v.get("data").and_then(|d| d.as_array()))?;
+    for item in arr {
+        let status = item.get("status").and_then(|x| x.as_str()).unwrap_or("");
+        if status != "finished" {
+            continue;
+        }
+        if let Some(ts) = item
+            .get("created_at")
+            .and_then(|x| x.as_str())
+            .and_then(parse_loose_datetime)
+        {
+            return Some(ts);
+        }
+    }
+    None
 }
 
 /// Look up `SERVICE_URL_*` / `SERVICE_FQDN_*` env-var VALUES for each

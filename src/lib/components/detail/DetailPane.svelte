@@ -34,11 +34,20 @@ Props:
 	import DeployDialog from "./DeployDialog.svelte";
 	import OverviewTab from "./tabs/OverviewTab.svelte";
 	import EnvTab from "./tabs/EnvTab.svelte";
+	import XIcon from "@lucide/svelte/icons/x";
 	import BuildTab from "./tabs/BuildTab.svelte";
 	import LogsTab from "./tabs/LogsTab.svelte";
 	import ImagesTab from "./tabs/ImagesTab.svelte";
 
-	let { resource }: { resource: Resource | null } = $props();
+	let {
+		resource,
+		onClose,
+	}: {
+		resource: Resource | null;
+		/** Caller-provided close handler. Renders an X button inline with
+		 *  the action buttons so it doesn't overlap with Restart/Stop/Deploy. */
+		onClose?: () => void;
+	} = $props();
 
 	type TabKey = "overview" | "env" | "compose" | "logs" | "images";
 	let activeTab = $state<TabKey>("overview");
@@ -65,16 +74,25 @@ Props:
 	// fetched independently so the detail pane renders immediately and the
 	// Env tab populates in a second pass.
 	$effect(() => {
+		// CRITICAL: track ONLY `selectionKey`, not `resource`. The polling
+		// loop reassigns the `resource` prop every 5s with a fresh object —
+		// if this effect read `resource.uuid` reactively, every poll would
+		// wipe `detail` + `envs` (causing the Images tab + Env count badge
+		// to flicker out between blank state and refetch). selectionKey is
+		// a stable `"${kind}:${uuid}"` string; parse uuid + kind from it
+		// so we don't re-subscribe to the resource object itself.
 		const key = selectionKey;
 		detail = null;
 		envs = [];
 		detailError = null;
-		if (key == null || resource == null) return;
+		if (key == null) return;
+		const colon = key.indexOf(":");
+		if (colon === -1) return;
+		const kind = key.slice(0, colon) as Resource["kind"];
+		const uuid = key.slice(colon + 1);
 
 		let cancelled = false;
 		detailLoading = true;
-		const uuid = resource.uuid;
-		const kind = resource.kind;
 		api
 			.getResourceDetail(uuid, kind)
 			.then((d) => {
@@ -135,7 +153,6 @@ Props:
 				(detail?.docker_compose_raw ?? null) != null),
 	);
 
-	const envCount = $derived(envs.length);
 	// Use `!important` variants + dark-mode equivalents to override the
 	// base TabsTrigger classes (which set dark:text-muted-foreground at
 	// higher specificity in the cascade).
@@ -215,6 +232,17 @@ Props:
 					<Button size="sm" onclick={() => (deployOpen = true)}>
 						Deploy
 					</Button>
+					{#if onClose}
+						<button
+							type="button"
+							class="ml-1 inline-flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground"
+							aria-label="Close detail pane"
+							title="Close (Esc)"
+							onclick={onClose}
+						>
+							<XIcon class="size-4" />
+						</button>
+					{/if}
 				</div>
 			</div>
 
@@ -248,7 +276,7 @@ Props:
 					value="env"
 					class={activeTab === "env" ? activeTabClass : ""}
 				>
-					Env{envCount > 0 ? ` (${envCount})` : ""}
+					Env
 				</TabsTrigger>
 				{#if showBuildTab}
 					<TabsTrigger

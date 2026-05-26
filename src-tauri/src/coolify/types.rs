@@ -372,10 +372,14 @@ impl RawApplication {
         // the last deploy. ops::list_resources can still OVERRIDE with the
         // exact /deployments record when its 5-min cache has a value.
         let last_online_only = pick_last_deployed(self.last_online_at, None);
+        // Defensive matcher: Coolify has used values like "deploy" but
+        // also potentially variants such as "manual_deploy" depending on
+        // version. Substring match covers them all without false-positives
+        // (manual/restart/stop don't contain "deploy").
         let restart_was_deploy = self
             .last_restart_type
             .as_deref()
-            .map(|t| t.eq_ignore_ascii_case("deploy"))
+            .map(|t| t.to_ascii_lowercase().contains("deploy"))
             .unwrap_or(false);
         let last_deploy_from_restart = if restart_was_deploy {
             pick_last_deployed(self.last_restart_at, None)

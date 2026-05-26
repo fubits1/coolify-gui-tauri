@@ -51,12 +51,35 @@ async fn check_via_hub_api(image_ref: &str) -> Result<ImageCacheEntry, String> {
         .await
         .map_err(|e| format!("docker hub api: {}", e))?;
 
-    let current_digest = page
+    // First try: find the pinned tag in the most-recent page.
+    let mut current_digest = page
         .results
         .iter()
         .find(|t| t.name == current_tag)
         .and_then(hub::primary_digest_for)
         .unwrap_or_default();
+
+    // Fallback: if the pinned tag is OLDER than the 100 most-recent
+    // publications, it's not on the first page. Fetch it by name. One
+    // extra round-trip per cache miss; results are cached on disk so
+    // subsequent reads hit the cache.
+    if current_digest.is_empty() {
+        match hub::fetch_tag(&namespace, &repository, &current_tag).await {
+            Ok(tag) => {
+                if let Some(d) = hub::primary_digest_for(&tag) {
+                    current_digest = d;
+                }
+            }
+            Err(e) => {
+                tracing::debug!(
+                    "hub fetch_tag fallback failed for {}:{} - {}",
+                    repository,
+                    current_tag,
+                    e
+                );
+            }
+        }
+    }
 
     let newest = page.results.first();
     let latest_digest = match newest {

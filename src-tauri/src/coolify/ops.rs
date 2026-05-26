@@ -365,7 +365,37 @@ pub async fn get_resource_detail(
     let client = clone_client(&state).await?;
     let path = format!("api/v1/{}/{}", resource_kind.path_segment(), uuid);
     let raw: serde_json::Value = client.get(&path).await.map_err(|e| e.to_string())?;
-    Ok(build_detail(raw, resource_kind))
+    let mut detail = build_detail(raw, resource_kind);
+    // For Applications, the per-resource detail payload's `last_online_at`
+    // is a continuous heartbeat (refreshed by Coolify's status reconciler)
+    // — it shows "few seconds ago" for any running app regardless of when
+    // the user last deployed. Override with the most recent FINISHED
+    // record from /deployments. For Services + Databases this Coolify
+    // version's `last_online_at` happens to track only deploy events, so
+    // build_detail's heuristic is left alone for those kinds.
+    if matches!(resource_kind, ResourceKind::Application) {
+        let dpath = format!("api/v1/deployments/applications/{}?take=3", uuid);
+        match client.get::<serde_json::Value>(&dpath).await {
+            Ok(v) => {
+                detail.last_deployed_at = extract_last_finished_deployment_timestamp(&v);
+            }
+            Err(e) => {
+                tracing::warn!("detail last_deploy fetch failed for {}: {}", uuid, e);
+                detail.last_deployed_at = None;
+            }
+        }
+        // Write back into the shared deploy_cache so list_resources's
+        // next poll surfaces the SAME timestamp the user just saw.
+        let mut cache = state.deploy_cache.write().await;
+        cache.insert(
+            uuid.clone(),
+            super::DeployCacheEntry {
+                last_deployed_at: detail.last_deployed_at,
+                fetched_at: Instant::now(),
+            },
+        );
+    }
+    Ok(detail)
 }
 
 /// Fetch env vars for a resource. Separate command so the detail pane can
@@ -486,6 +516,12 @@ pub async fn deploy_resource(
     let client = clone_client(&state).await?;
     let path = format!("api/v1/deploy?uuid={}&force={}", uuid, force);
     client.get_raw(&path).await.map_err(|e| e.to_string())?;
+    // Invalidate the per-app deploy_cache entry so the next list refresh
+    // sees the new finished record once it lands, instead of returning the
+    // 5-min cached value (which would show the OLD deploy time long after
+    // the user redeployed and would diverge from the detail tab's live
+    // /deployments fetch).
+    state.deploy_cache.write().await.remove(&uuid);
     Ok(())
 }
 
@@ -637,10 +673,7 @@ async fn fetch_last_deployments(
         let client = client.clone();
         let uuid = uuid.clone();
         futs.push(async move {
-            // take=10: the most recent record may be queued/in_progress/failed,
-            // none of which mean "this is the version actually running". Fetch
-            // a small window and pick the most recent FINISHED deployment.
-            let path = format!("api/v1/deployments/applications/{}?take=10", uuid);
+            let path = format!("api/v1/deployments/applications/{}?take=3", uuid);
             let res: Result<serde_json::Value, _> = client.get(&path).await;
             let ts = match res {
                 Ok(v) => extract_last_finished_deployment_timestamp(&v),
@@ -684,8 +717,12 @@ async fn fetch_last_deployments(
 fn extract_last_finished_deployment_timestamp(
     v: &serde_json::Value,
 ) -> Option<chrono::DateTime<chrono::Utc>> {
+    // Coolify v1 ships /deployments/applications/{uuid} as
+    // `{"deployments": [...]}`. Older / future versions may use `data` or
+    // a bare array — accept all three so we're robust to schema drift.
     let arr = v
         .as_array()
+        .or_else(|| v.get("deployments").and_then(|d| d.as_array()))
         .or_else(|| v.get("data").and_then(|d| d.as_array()))?;
     for item in arr {
         let status = item.get("status").and_then(|x| x.as_str()).unwrap_or("");

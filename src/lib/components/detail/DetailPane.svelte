@@ -308,7 +308,7 @@ Props:
 				{:else if detailError}
 					<div class="text-sm text-destructive">{detailError}</div>
 				{:else if detail}
-					<OverviewTab {detail} />
+					<OverviewTab {detail} {resource} />
 				{/if}
 			</TabsContent>
 

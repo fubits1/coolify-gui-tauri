@@ -340,20 +340,27 @@ fn parse_loose_datetime(s: &str) -> Option<DateTime<Utc>> {
     None
 }
 
-/// Resolve the "Last deploy" timestamp for the overview row.
+/// Resolve a "Last deploy" timestamp for the overview row.
 ///
-/// `last_online_at` is the only field that actually tracks deployments;
-/// `updated_at` is bumped on any config touch (env vars, healthcheck change,
-/// FQDN edit, etc.) and would falsely show "just now" for resources that
-/// haven't deployed in months. So we ONLY use `last_online_at`. If the
-/// resource has never come online, the cell renders `—`.
+/// Per-kind notes:
+/// - Applications: caller passes `last_online_at` + `None`. Apps' final
+///   value is overridden in `ops::list_resources` from the /deployments
+///   `finished` record, so this fallback only matters for non-app kinds.
+/// - Services + Databases (on the user's Coolify version): `last_online_at`
+///   bumps on deploy, NOT on heartbeat — making it a clean deploy proxy.
+///   When it's missing we accept `updated_at` as a secondary fallback;
+///   it's noisier but better than rendering "—" for never-redeployed
+///   services where Coolify only sets `updated_at` at create time.
 ///
 /// Accepts RFC 3339 and MySQL `YYYY-MM-DD HH:MM:SS` (with or without `T`).
 fn pick_last_deployed(
     last_online: Option<String>,
-    _updated: Option<String>,
+    updated: Option<String>,
 ) -> Option<DateTime<Utc>> {
-    last_online.as_deref().and_then(parse_loose_datetime)
+    last_online
+        .as_deref()
+        .and_then(parse_loose_datetime)
+        .or_else(|| updated.as_deref().and_then(parse_loose_datetime))
 }
 
 impl RawApplication {
@@ -455,6 +462,10 @@ impl RawService {
             .as_deref()
             .map(scrape_compose_images)
             .unwrap_or_default();
+        // Services on the user's Coolify version bump last_online_at on
+        // real deploy events only (verified runtime — Applications get a
+        // continuous heartbeat there, but Services don't). Use it as the
+        // best-available deploy proxy so the overview column populates.
         Resource {
             uuid: self.uuid.unwrap_or_default(),
             name: self.name.unwrap_or_default(),
@@ -469,7 +480,7 @@ impl RawService {
             image_ref: None,
             image_refs,
             last_online_at: last_deployed_at,
-            last_deployed_at: None,
+            last_deployed_at,
             build_pack: None,
         }
     }

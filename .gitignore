@@ -12,3 +12,6 @@ vite.config.ts.timestamp-*
 # agent scratch / external docs cache
 .superpowers/
 docs/external/
+
+# Other
+.playwright-mcp/

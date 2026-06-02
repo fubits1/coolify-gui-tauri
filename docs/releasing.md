@@ -15,12 +15,31 @@ Tag-driven, cross-OS, via GitHub Actions
    (e.g. `"0.1.0.1"` for `0.1.0-alpha.1`). MSI's version field rejects
    anything beyond `MAJOR.MINOR.PATCH.BUILD` with all four parts numeric.
 
-2. **Commit + tag + push:**
+2. **Commit + tag + push.** The workflow trigger is `on.push.tags: v*` —
+   it doesn't care which branch the tag points at. What matters is that
+   the **tag itself** reaches the remote.
 
    ```bash
    git commit -am "release: v0.2.0"
    git tag v0.2.0
-   git push origin main --follow-tags
+   # --follow-tags pushes annotated tags reachable from the pushed
+   # commits. Lightweight tags (created without -a / -m / -s) are
+   # ignored even with --follow-tags — push them explicitly.
+   git push origin "$(git branch --show-current)" --follow-tags
+   ```
+
+   **Common mistake:** pushing the commit without the tag. The release
+   commit shows up on the remote but no workflow fires. To verify:
+
+   ```bash
+   git ls-remote --tags origin v0.2.0   # must return a sha; empty = not pushed
+   gh run list --workflow release.yml --limit 3
+   ```
+
+   If the tag is missing remotely, push it now:
+
+   ```bash
+   git push origin v0.2.0
    ```
 
 3. **Watch the workflow** in the Actions tab or via CLI:

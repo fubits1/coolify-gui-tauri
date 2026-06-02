@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
+  CurrentTeam,
   EnvVar,
   Resource,
   ResourceDetail,
@@ -23,6 +24,8 @@ export type ListResourcesResult = {
 export const api = {
   testConnection: (url: string, token: string) =>
     invoke<TestConnectionResult>("test_connection", { url, token }),
+  getCurrentTeam: (instanceId: string) =>
+    invoke<CurrentTeam>("get_current_team", { instanceId }),
   setCredentials: (instanceId: string, url: string, token: string) =>
     invoke<void>("set_credentials", { instanceId, url, token }),
   loadCredentials: (instanceId: string, url: string) =>

@@ -31,15 +31,35 @@ Props:
 		embed?: boolean;
 	} = $props();
 
+	type TeamOption = { id: number; name: string };
+
 	let url = $state("");
 	let token = $state("");
 	let alias = $state("");
 	let testing = $state(false);
 	let saving = $state(false);
-	let tested = $state<{ ok: boolean; team?: string; error?: string } | null>(null);
+	let tested = $state<{
+		ok: boolean;
+		teams?: TeamOption[];
+		/** The single team this token actually queries against. Coolify's
+		 *  `/applications` etc. ignore client team selection — they filter
+		 *  by the team this PAT was bound to at creation. Other entries
+		 *  in `teams` are visible but not queryable with this token. */
+		boundTeamId?: number | null;
+		error?: string;
+	} | null>(null);
+	/** User's pick in the team dropdown. Pre-filled to `/teams/current`
+	 *  on a successful test; can be re-selected before save. */
+	let selectedTeamId = $state<number | null>(null);
 
 	const canTest = $derived(url.trim().length > 0 && token.trim().length > 0 && !testing);
-	const canSave = $derived(tested?.ok === true && !saving);
+	const canSave = $derived(
+		tested?.ok === true && selectedTeamId !== null && !saving,
+	);
+
+	const selectedTeam = $derived(
+		tested?.teams?.find((t) => t.id === selectedTeamId) ?? null,
+	);
 
 	async function handleTest() {
 		testing = true;
@@ -47,7 +67,26 @@ Props:
 		try {
 			const result = await api.testConnection(url.trim(), token.trim());
 			if (result.ok) {
-				tested = { ok: true, team: result.team_name };
+				if (!result.teams || result.teams.length === 0) {
+					const msg =
+						"Coolify returned no teams for this token. Check the token's scope (`read:sensitive` + `deploy`).";
+					tested = { ok: false, error: msg };
+					toast.error("Connection failed", msg);
+					return;
+				}
+				tested = {
+					ok: true,
+					teams: result.teams,
+					boundTeamId: result.current_team_id ?? null,
+				};
+				// Coolify's API hard-filters /applications by the token's
+				// bound team — selecting another team in the dropdown
+				// would just mislabel a tab while showing the wrong
+				// resources. Force the bound team as the only valid pick.
+				const bound =
+					result.teams.find((t) => t.id === result.current_team_id) ??
+					result.teams[0];
+				selectedTeamId = bound.id;
 			} else {
 				const err = result.error ?? "Unknown error";
 				tested = { ok: false, error: err };
@@ -63,12 +102,18 @@ Props:
 	}
 
 	async function handleSave() {
-		if (!tested?.ok) return;
+		if (!tested?.ok || !selectedTeam) return;
 		saving = true;
 		try {
 			const aliasValue = alias.trim() || new URL(url.trim()).host;
-			const added = await instances.add(url.trim(), token.trim(), aliasValue);
-			toast.success(`Connected to ${tested.team ?? aliasValue}`);
+			const added = await instances.add(
+				url.trim(),
+				token.trim(),
+				aliasValue,
+				selectedTeam.id,
+				selectedTeam.name,
+			);
+			toast.success(`Connected to ${aliasValue} · ${selectedTeam.name}`);
 			onConnected(added.id);
 		} catch (err) {
 			const msg = err instanceof Error ? err.message : String(err);
@@ -80,7 +125,10 @@ Props:
 
 	// Editing the form invalidates a previous successful test.
 	function invalidate() {
-		if (tested) tested = null;
+		if (tested) {
+			tested = null;
+			selectedTeamId = null;
+		}
 	}
 </script>
 
@@ -155,15 +203,35 @@ Props:
 					/>
 				</div>
 
-				{#if tested?.ok}
+				{#if tested?.ok && tested.teams}
 					<div
 						class="flex items-center gap-2 rounded-md border border-green-500/40 bg-green-500/10 px-3 py-2 text-sm text-green-400"
 						role="status"
 					>
 						<span aria-hidden="true">✓</span>
 						<span>
-							Connected{tested.team ? ` — team ${tested.team}` : ""}.
+							Connected — {tested.teams.length} team{tested.teams.length === 1 ? "" : "s"} visible.
 						</span>
+					</div>
+					<div class="flex flex-col gap-1.5">
+						<Label for="coolify-team">Team</Label>
+						<select
+							id="coolify-team"
+							class="h-9 rounded-md border border-input bg-background px-2 text-sm"
+							bind:value={selectedTeamId}
+						>
+							{#each tested.teams as team (team.id)}
+								{@const bound = team.id === tested.boundTeamId}
+								<option value={team.id} disabled={!bound}>
+									{team.name} (id: {team.id}){bound ? "" : " — needs separate PAT"}
+								</option>
+							{/each}
+						</select>
+						<p class="text-xs text-muted-foreground">
+							Coolify's API hard-filters resources by the team this PAT was created in.
+							Other teams here are visible but not queryable with this token —
+							switch teams in Coolify's dashboard first, then create a new PAT for that team.
+						</p>
 					</div>
 				{:else if tested && !tested.ok}
 					<div

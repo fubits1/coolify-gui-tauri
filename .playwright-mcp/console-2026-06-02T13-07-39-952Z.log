@@ -1,0 +1,11 @@
+[   96866ms] TypeError: Cannot read properties of undefined (reading 'invoke')
+    at invoke (http://localhost:1420/node_modules/.vite/deps/chunk-SNETGTVY.js?v=ea41bc26:109:37)
+    at _Store.load (http://localhost:1420/node_modules/.vite/deps/@tauri-apps_plugin-store.js?v=ea41bc26:141:23)
+    at load (http://localhost:1420/node_modules/.vite/deps/@tauri-apps_plugin-store.js?v=ea41bc26:49:22)
+    at #getStore (http://localhost:1420/src/lib/stores/instances.svelte.ts:66:49)
+    at #doLoad (http://localhost:1420/src/lib/stores/instances.svelte.ts:91:62)
+    at InstancesStore.load (http://localhost:1420/src/lib/stores/instances.svelte.ts:85:35)
+    at _page (http://localhost:1420/src/routes/+page.svelte:41:17)
+    at http://localhost:1420/node_modules/.vite/deps/chunk-CQI3WTZN.js?v=ea41bc26:737:56
+    at update_reaction (http://localhost:1420/node_modules/.vite/deps/chunk-IJIOPU2L.js?v=ea41bc26:4202:18)
+    at update_effect (http://localhost:1420/node_modules/.vite/deps/chunk-IJIOPU2L.js?v=ea41bc26:4343:21)

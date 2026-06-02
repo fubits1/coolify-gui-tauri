@@ -78,7 +78,11 @@ fresh first-run state.
 					title={state}
 					aria-hidden="true"
 				></span>
-				<span class="truncate max-w-[10rem]">{inst.alias}</span>
+				<span class="truncate max-w-[14rem]"
+					>{inst.alias}{inst.teamName
+						? ` · ${inst.teamName}`
+						: ""}</span
+				>
 			</button>
 			<button
 				type="button"

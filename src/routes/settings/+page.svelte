@@ -24,9 +24,13 @@
 	let dockerHubPat = $state("");
 	let ghcrPat = $state("");
 	let testing = $state(false);
-	let testResult = $state<{ ok: boolean; team?: string; error?: string } | null>(
-		null,
-	);
+	let testResult = $state<{
+		ok: boolean;
+		teamId?: number;
+		team?: string;
+		teams?: { id: number; name: string }[];
+		error?: string;
+	} | null>(null);
 
 	onMount(async () => {
 		await instances.load();
@@ -61,10 +65,19 @@
 				toast.error(`Connection failed: ${res.error ?? "Unknown error"}`);
 				return;
 			}
-			testResult = { ok: true, team: res.team_name };
+			// Pick the token's current team (when reported), else first.
+			const picked =
+				res.teams.find((t) => t.id === res.current_team_id) ??
+				res.teams[0];
+			testResult = {
+				ok: true,
+				teamId: picked?.id,
+				team: picked?.name,
+				teams: res.teams,
+			};
 			toast.success(
-				res.team_name
-					? `Connected to team "${res.team_name}"`
+				picked
+					? `Connected — ${res.teams.length} team${res.teams.length === 1 ? "" : "s"} visible, default "${picked.name}"`
 					: "Connection OK",
 			);
 		} catch (err) {
@@ -83,14 +96,23 @@
 				await api.setCredentials(editingId, url, token);
 				token = "";
 			}
-			// Update the persisted url + alias on this instance entry.
+			// Update the persisted fields. If the user just tested + the
+			// probe returned a team, refresh `teamId` / `teamName` to match
+			// — handles the case where token rotation also switched team.
 			const idx = instances.list.findIndex(
 				(instance) => instance.id === editingId,
 			);
 			if (idx !== -1) {
 				const next = [...instances.list];
-				const ready = next[idx].ready;
-				next[idx] = { id: editingId, url, alias, ready };
+				const prev = next[idx];
+				next[idx] = {
+					id: editingId,
+					url,
+					alias,
+					teamId: testResult?.ok ? (testResult.teamId ?? prev.teamId) : prev.teamId,
+					teamName: testResult?.ok ? (testResult.team ?? prev.teamName) : prev.teamName,
+					ready: prev.ready,
+				};
 				instances.list = next;
 				await instances.setActive(instances.activeId ?? editingId);
 			}
@@ -180,7 +202,11 @@
 					bind:value={editingId}
 				>
 					{#each instances.list as inst (inst.id)}
-						<option value={inst.id}>{inst.alias} — {inst.url}</option>
+						<option value={inst.id}
+							>{inst.alias}{inst.teamName
+								? ` · ${inst.teamName}`
+								: ""} — {inst.url}</option
+						>
 					{/each}
 				</select>
 			</div>
@@ -238,6 +264,42 @@
 					Remove instance
 				</Button>
 			</div>
+		</CardContent>
+	</Card>
+
+	<Card>
+		<CardHeader>
+			<CardTitle>Default tab</CardTitle>
+			<CardDescription>
+				Which tab opens on launch. Defaults to the first in the list.
+			</CardDescription>
+		</CardHeader>
+		<CardContent class="flex flex-col gap-2">
+			<label class="flex items-center gap-2 text-sm">
+				<input
+					type="radio"
+					name="default-tab"
+					value=""
+					checked={instances.defaultId === null}
+					onchange={() => void instances.setDefault(null)}
+				/>
+				<span class="text-muted-foreground">First in list</span>
+			</label>
+			{#each instances.list as inst (inst.id)}
+				<label class="flex items-center gap-2 text-sm">
+					<input
+						type="radio"
+						name="default-tab"
+						value={inst.id}
+						checked={instances.defaultId === inst.id}
+						onchange={() => void instances.setDefault(inst.id)}
+					/>
+					<span>
+						{inst.alias}{inst.teamName ? ` · ${inst.teamName}` : ""}
+						<span class="text-muted-foreground">— {inst.url}</span>
+					</span>
+				</label>
+			{/each}
 		</CardContent>
 	</Card>
 

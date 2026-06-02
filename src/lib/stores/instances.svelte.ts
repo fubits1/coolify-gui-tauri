@@ -27,6 +27,13 @@ export type Instance = {
   id: string;
   url: string;
   alias: string;
+  /** Coolify team this PAT is scoped to (`GET /teams/current`). Populated
+   *  on add + backfilled on load for legacy entries that pre-date the
+   *  per-team tab refactor. A null `teamId` means "not yet backfilled" —
+   *  the tab still works, but dedupe won't catch a second token for the
+   *  same team until backfill completes. */
+  teamId: number | null;
+  teamName: string | null;
   /** True once `api.loadCredentials` has resolved successfully for this
    *  instance (token rehydrated from keyring). Tracked here so consumers
    *  don't have to maintain a parallel `credentialsReady` map and we
@@ -38,10 +45,14 @@ const STORE_FILE = "instances.json";
 const LEGACY_FILE = "instance.json";
 const KEY_LIST = "list";
 const KEY_ACTIVE = "activeId";
+const KEY_DEFAULT = "defaultId";
 
 class InstancesStore {
   list: Instance[] = $state([]);
   activeId: string | null = $state(null);
+  /** Persisted "open this tab on launch" pointer. Null = use first in
+   *  list. Surfaced in Settings as a radio per row. */
+  defaultId: string | null = $state(null);
 
   active: Instance | null = $derived(
     this.activeId == null
@@ -81,9 +92,15 @@ class InstancesStore {
 
   async #doLoad(): Promise<void> {
     const store = await this.#getStore();
-    type StoredInstance = Omit<Instance, "ready">;
+    // `teamId` / `teamName` are optional in the on-disk shape because old
+    // installs predate the per-team refactor. Backfill runs below.
+    type StoredInstance = Omit<Instance, "ready"> & {
+      teamId?: number | null;
+      teamName?: string | null;
+    };
     const stored = (await store.get<StoredInstance[]>(KEY_LIST)) ?? [];
     const activeId = (await store.get<string>(KEY_ACTIVE)) ?? null;
+    const defaultId = (await store.get<string>(KEY_DEFAULT)) ?? null;
 
     const hydrated: Instance[] = await Promise.all(
       stored.map(async (record) => {
@@ -99,18 +116,67 @@ class InstancesStore {
             `[instances] loadCredentials failed for ${record.alias}: ${message}`,
           );
         }
-        return { ...record, ready };
+        return {
+          id: record.id,
+          url: record.url,
+          alias: record.alias,
+          teamId: record.teamId ?? null,
+          teamName: record.teamName ?? null,
+          ready,
+        };
       }),
     );
 
     this.list = hydrated;
+    this.defaultId =
+      defaultId && hydrated.find((i) => i.id === defaultId) ? defaultId : null;
+    const preferred = activeId ?? this.defaultId;
     this.activeId =
-      activeId && hydrated.find((instance) => instance.id === activeId)
-        ? activeId
+      preferred && hydrated.find((instance) => instance.id === preferred)
+        ? preferred
         : (hydrated[0]?.id ?? null);
     if (this.list.length === 0) {
       await this.#migrateLegacy();
     }
+    // Fire-and-forget: any ready instance missing team metadata gets
+    // backfilled from `/teams/current`. We don't block load — the tab is
+    // usable with a placeholder label; the strip rerenders when each one
+    // resolves.
+    void this.#backfillTeams();
+  }
+
+  /**
+   * For every `ready` instance lacking `teamId`, call `GET /teams/current`
+   * to learn the team this PAT is bound to and persist. Idempotent —
+   * skipped per-instance once both fields are set.
+   */
+  async #backfillTeams(): Promise<void> {
+    const todo = this.list.filter(
+      (i) => i.ready && (i.teamId == null || i.teamName == null),
+    );
+    if (todo.length === 0) return;
+    let mutated = false;
+    for (const inst of todo) {
+      try {
+        const team = await api.getCurrentTeam(inst.id);
+        const idx = this.list.findIndex((i) => i.id === inst.id);
+        if (idx === -1) continue;
+        const next = [...this.list];
+        next[idx] = {
+          ...next[idx],
+          teamId: team.team_id,
+          teamName: team.team_name,
+        };
+        this.list = next;
+        mutated = true;
+      } catch (err) {
+        console.warn(
+          `[instances] team backfill failed for ${inst.alias}:`,
+          err,
+        );
+      }
+    }
+    if (mutated) await this.#persist();
   }
 
   /**
@@ -158,7 +224,18 @@ class InstancesStore {
     await api.setCredentials(id, url, token);
     connectionRegistry.ensure(id);
     resourcesRegistry.ensure(id);
-    const instance: Instance = { id, url, alias, ready: true };
+    // Team metadata stays null here — `#backfillTeams` (kicked off at the
+    // end of `#doLoad`) fills it in on next load. We could fetch
+    // synchronously, but the legacy migration runs once and a missing
+    // team label for a single load cycle isn't worth blocking on.
+    const instance: Instance = {
+      id,
+      url,
+      alias,
+      teamId: null,
+      teamName: null,
+      ready: true,
+    };
     this.list = [instance];
     this.activeId = id;
     await this.#persist();
@@ -171,17 +248,39 @@ class InstancesStore {
 
   /**
    * Add a NEW instance. Caller has already validated `url + token` via
-   * `api.testConnection`. We generate the id here, write the token to
-   * keyring under the new scheme, persist the metadata, and switch
-   * active to the new entry.
+   * `api.testConnection` and passes the resolved `team_id` + `team_name`
+   * from that probe. We dedupe on `(url, teamId)` — two tabs for the
+   * same team are an accident, not a feature.
    */
-  async add(url: string, token: string, alias: string): Promise<Instance> {
+  async add(
+    url: string,
+    token: string,
+    alias: string,
+    teamId: number,
+    teamName: string,
+  ): Promise<Instance> {
     await this.load();
+    const normalizedUrl = url.replace(/\/+$/, "");
+    const duplicate = this.list.find(
+      (i) => i.url.replace(/\/+$/, "") === normalizedUrl && i.teamId === teamId,
+    );
+    if (duplicate) {
+      throw new Error(
+        `Already connected to "${teamName}" on ${normalizedUrl} (tab "${duplicate.alias}"). Remove the existing tab first to replace its token.`,
+      );
+    }
     const id = crypto.randomUUID();
     await api.setCredentials(id, url, token);
     connectionRegistry.ensure(id);
     resourcesRegistry.ensure(id);
-    const instance: Instance = { id, url, alias, ready: true };
+    const instance: Instance = {
+      id,
+      url,
+      alias,
+      teamId,
+      teamName,
+      ready: true,
+    };
     this.list = [...this.list, instance];
     this.activeId = id;
     await this.#persist();
@@ -201,6 +300,20 @@ class InstancesStore {
     if (this.activeId === id) {
       this.activeId = next[0]?.id ?? null;
     }
+    if (this.defaultId === id) {
+      this.defaultId = null;
+    }
+    await this.#persist();
+  }
+
+  /**
+   * Persist the "open this tab on launch" pointer. Pass `null` to clear
+   * (boot will fall back to first-in-list).
+   */
+  async setDefault(id: string | null): Promise<void> {
+    await this.load();
+    if (id != null && !this.list.find((i) => i.id === id)) return;
+    this.defaultId = id;
     await this.#persist();
   }
 
@@ -220,9 +333,16 @@ class InstancesStore {
     const store = await this.#getStore();
     // Persist only the disk-side fields; `ready` is runtime-only (it
     // reflects the keyring state and is recomputed on every load).
-    const stored = this.list.map(({ id, url, alias }) => ({ id, url, alias }));
+    const stored = this.list.map(({ id, url, alias, teamId, teamName }) => ({
+      id,
+      url,
+      alias,
+      teamId,
+      teamName,
+    }));
     await store.set(KEY_LIST, stored);
     await store.set(KEY_ACTIVE, this.activeId);
+    await store.set(KEY_DEFAULT, this.defaultId);
     await store.save();
   }
 }

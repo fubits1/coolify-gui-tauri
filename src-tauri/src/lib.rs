@@ -21,6 +21,7 @@ pub fn run() {
         .manage(coolify::AppState::new())
         .invoke_handler(tauri::generate_handler![
             coolify::ops::test_connection,
+            coolify::ops::get_current_team,
             coolify::ops::set_credentials,
             coolify::ops::load_credentials,
             coolify::ops::clear_credentials,

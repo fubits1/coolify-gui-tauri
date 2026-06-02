@@ -201,7 +201,9 @@
 		{#if activeInstance && activeReady && activeResources && activeConnection}
 			<ConnectionStrip
 				state={activeConnection.state}
-				alias={activeInstance.alias}
+				alias={activeInstance.teamName
+					? `${activeInstance.alias} · ${activeInstance.teamName}`
+					: activeInstance.alias}
 				retryInSec={activeConnection.reconnectInSec ?? 0}
 			/>
 

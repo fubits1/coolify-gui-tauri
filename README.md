@@ -18,7 +18,7 @@ Pre-built binaries are published on the [GitHub Releases](https://github.com/fub
 
 1. Install and launch.
 2. Paste your **Coolify URL** (e.g. `https://acme.coolify.dev`) and a **Bearer token**.
-3. Hit **Test connection**, then **Save**.
+3. Hit **Test connection**, pick the team from the dropdown, then **Save**.
 
 ### Required token scope
 
@@ -28,6 +28,23 @@ In the Coolify dashboard, create a Personal Access Token with:
 - `deploy` — Restart / Stop / Deploy actions.
 
 `write` and `root` are **not** required. The token is stored in your OS keyring (Keychain / Credential Manager / Secret Service); the webview never holds it.
+
+### Multiple teams = multiple tokens
+
+Coolify PATs are **team-scoped at creation**: each token's `team_id` column is stamped from your Coolify web session's currently-active team at the moment you click "Create New Token". Coolify's API (`/applications`, `/services`, `/databases`) hard-filters every list response by that team_id — there is no header, query param, or scope that lets one token span teams.
+
+Consequences for this app:
+
+- One tab per `(instance, team)` pair. Each tab needs its own PAT.
+- A token that was created under team A will **only ever** return team A's resources, regardless of what the Coolify dashboard's "Keys & Tokens" page shows when you switch teams (the UI lists all your user-owned tokens under each team you switch to — that's a display quirk, not a rebind).
+- The team dropdown shown after a successful "Test connection" lists every team your user belongs to, but only the **token's bound team** is selectable. The others appear grayed out with `— needs separate PAT`.
+
+To add a second team:
+
+1. In the Coolify dashboard, **switch the active team** to the second team (top-right team picker — verify the switch took by refreshing the page).
+2. Open **Keys & Tokens** → **+ Create New Token** (do *not* reuse an existing token).
+3. The new token's row in `personal_access_tokens` gets `team_id = <second team>.id`.
+4. In the app, click **+ Add** in the tab strip and paste the new token. The team dropdown now offers the second team as selectable.
 
 ## Build from source
 

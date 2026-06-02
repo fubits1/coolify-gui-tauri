@@ -11,15 +11,34 @@ use super::types::{
 };
 use super::{AppState, ProjectEnvCache, ProjectEnvLookup};
 
+/// Bare team identifier used by the onboarding team picker.
+#[derive(Debug, Serialize, Clone)]
+pub struct TeamRef {
+    pub id: i64,
+    pub name: String,
+}
+
 /// Result of an onboarding "Test connection" probe.
 ///
-/// `ok=true` means both `/health` (no auth) and `/teams` (with token)
-/// returned 2xx. `team_name` populates the connection-strip label.
+/// `ok=true` means `/health` (no auth) and `/teams` (with token) both
+/// returned 2xx. `teams` is the FULL list of teams visible to this
+/// token (`GET /teams`). `current_team_id` is the token's own bound
+/// team per `/teams/current` (when Coolify reports one) — used to
+/// pre-select the dropdown in `ConnectScreen`.
 #[derive(Debug, Serialize)]
 pub struct TestConnectionResult {
     pub ok: bool,
     pub version: Option<String>,
-    pub team_name: Option<String>,
+    pub teams: Vec<TeamRef>,
+    pub current_team_id: Option<i64>,
+}
+
+/// `/teams/current` payload — used by migration backfill of legacy
+/// (pre-team-tab) instance records.
+#[derive(Debug, Serialize)]
+pub struct CurrentTeam {
+    pub team_id: i64,
+    pub team_name: String,
 }
 
 /// Bundle returned by `list_resources` so the frontend can surface
@@ -32,11 +51,15 @@ pub struct ListResourcesResult {
     pub errors: std::collections::HashMap<String, String>,
 }
 
-/// GET `/api/v1/health` then `/api/v1/teams` to validate a `{url, token}` pair.
+/// GET `/api/v1/health` + `/api/v1/teams` (+ `/teams/current` best-effort).
 ///
-/// Used by the onboarding screen before persisting the token to the keyring.
-/// We deliberately swallow the structured error and return `ok=false` instead
-/// of bubbling it — the frontend renders a toast either way.
+/// Used by the onboarding screen before persisting the token. `/teams`
+/// returns every team this token can reach; the frontend renders a
+/// dropdown so the user explicitly picks which team this tab represents
+/// (token-vs-team scoping is fuzzy across Coolify versions — letting
+/// the user choose is the simplest contract). `/teams/current` is
+/// called in parallel as a hint to pre-select the dropdown; failures
+/// there don't fail the probe.
 #[tauri::command]
 pub async fn test_connection(url: String, token: String) -> Result<TestConnectionResult, String> {
     let health_body = match CoolifyClient::get_unauthenticated_health(&url).await {
@@ -46,17 +69,51 @@ pub async fn test_connection(url: String, token: String) -> Result<TestConnectio
     let version = extract_version(&health_body);
 
     let client = CoolifyClient::new(&url, &token).map_err(|e| e.to_string())?;
-    let teams: serde_json::Value = client
-        .get("api/v1/teams")
-        .await
-        .map_err(|e| e.to_string())?;
-    let team_name = extract_first_team_name(&teams);
+    let teams_fut = client.get::<serde_json::Value>("api/v1/teams");
+    let current_fut = client.get::<serde_json::Value>("api/v1/teams/current");
+    let (teams_raw, current_raw) = tokio::join!(teams_fut, current_fut);
+
+    let teams_raw = teams_raw.map_err(|e| e.to_string())?;
+    let teams = extract_team_list(&teams_raw);
+    if teams.is_empty() {
+        return Err("Coolify /teams returned no teams for this token".to_string());
+    }
+
+    let current_team_id = current_raw
+        .ok()
+        .and_then(|v| extract_current_team(&v).0);
 
     Ok(TestConnectionResult {
         ok: true,
         version,
-        team_name,
+        teams,
+        current_team_id,
     })
+}
+
+/// Resolve the current team for an already-credentialed instance.
+///
+/// Used for migration backfill: existing `Instance` records that pre-date
+/// the per-team tab refactor don't carry `team_id` / `team_name`. On
+/// store hydration the frontend calls this to populate those fields.
+#[tauri::command]
+pub async fn get_current_team(
+    instance_id: String,
+    state: State<'_, AppState>,
+) -> Result<CurrentTeam, String> {
+    let client = clone_client(&state, &instance_id).await?;
+    let team: serde_json::Value = client
+        .get("api/v1/teams/current")
+        .await
+        .map_err(|e| e.to_string())?;
+    let (team_id, team_name) = extract_current_team(&team);
+    match (team_id, team_name) {
+        (Some(id), Some(name)) => Ok(CurrentTeam {
+            team_id: id,
+            team_name: name,
+        }),
+        _ => Err("Coolify /teams/current returned no id/name".to_string()),
+    }
 }
 
 /// Construct a fresh `CoolifyClient` and store it in `AppState`.
@@ -928,13 +985,30 @@ fn extract_version(health_body: &str) -> Option<String> {
     None
 }
 
-fn extract_first_team_name(teams: &serde_json::Value) -> Option<String> {
-    let arr = teams.as_array()?;
-    let first = arr.first()?;
-    first
+fn extract_current_team(team: &serde_json::Value) -> (Option<i64>, Option<String>) {
+    let id = team.get("id").and_then(|v| v.as_i64());
+    let name = team
         .get("name")
         .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
+        .map(|s| s.to_string());
+    (id, name)
+}
+
+fn extract_team_list(teams: &serde_json::Value) -> Vec<TeamRef> {
+    let Some(arr) = teams.as_array() else {
+        return Vec::new();
+    };
+    arr.iter()
+        .filter_map(|t| {
+            let id = t.get("id").and_then(|v| v.as_i64())?;
+            let name = t
+                .get("name")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| format!("team {id}"));
+            Some(TeamRef { id, name })
+        })
+        .collect()
 }
 
 fn build_detail(raw: serde_json::Value, kind: ResourceKind) -> ResourceDetail {

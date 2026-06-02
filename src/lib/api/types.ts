@@ -93,9 +93,24 @@ export interface ResourceDetail extends Resource {
   service_containers: ServiceContainer[];
 }
 
+export interface TeamRef {
+  id: number;
+  name: string;
+}
+
 export interface TestConnectionResult {
   ok: boolean;
   version?: string;
-  team_name?: string;
+  /** Every team `/teams` returned for this token. Onboarding renders a
+   *  dropdown over this list. */
+  teams: TeamRef[];
+  /** `/teams/current` id, when Coolify returned one. Used to pre-select
+   *  the dropdown — not required for save. */
+  current_team_id?: number;
   error?: string;
+}
+
+export interface CurrentTeam {
+  team_id: number;
+  team_name: string;
 }
